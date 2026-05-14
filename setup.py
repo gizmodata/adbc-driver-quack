@@ -52,6 +52,16 @@ class BinaryWheel(bdist_wheel):
 
     def get_tag(self):  # noqa: D401
         _python, _abi, plat = bdist_wheel.get_tag(self)
+        # PyPI rejects bare ``linux_x86_64`` / ``linux_aarch64`` tags
+        # (only manylinux / musllinux / specific tags are accepted), so
+        # rewrite to manylinux2014 — glibc 2.17, broadly compatible. Our
+        # Go-cgo binary links only to libc/libpthread/libdl/librt with
+        # ancient symbols, so this is honest, not optimistic. Proper
+        # auditwheel-repair-in-a-container is a future improvement.
+        if plat == "linux_x86_64":
+            plat = "manylinux2014_x86_64"
+        elif plat == "linux_aarch64":
+            plat = "manylinux2014_aarch64"
         return ("py3", "none", plat)
 
 

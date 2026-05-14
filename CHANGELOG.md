@@ -21,8 +21,15 @@ Linux users got a wheel with no usable binary and saw
   `setuptools.dist.Distribution` whose `has_ext_modules()` returns
   `True`. setuptools picks up that signal and tags each wheel with
   the build host's platform (e.g. `macosx_11_0_arm64`,
-  `linux_x86_64`, `linux_aarch64`, `win_amd64`) instead of the
-  default `py3-none-any`.
+  `manylinux2014_x86_64`, `manylinux2014_aarch64`, `win_amd64`)
+  instead of the default `py3-none-any`.
+- A `BinaryWheel(bdist_wheel)` subclass also pins the Python ABI tag
+  to `py3-none` (not the build host's `cp<ver>-cp<ver>`) — our
+  bundled lib isn't a CPython extension, any Python 3.10+ can load
+  it, so one wheel per platform suffices (4 total vs 5×4=20).
+- Linux tags are rewritten from bare `linux_*` to `manylinux2014_*`
+  (PyPI rejects the former; Go-cgo binaries link only to ancient
+  glibc symbols so manylinux2014 is honest, not optimistic).
 - All four matrix wheels (linux x86_64, linux arm64, macOS arm64,
   windows x86_64) now have distinct filenames, all land on PyPI, and
   `pip install adbc-driver-quack` selects the right one per user
