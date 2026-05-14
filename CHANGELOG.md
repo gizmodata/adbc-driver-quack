@@ -6,6 +6,43 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — Table constraints (PK + FK) in `GetObjects`
+
+- `getObjectsImpl` now populates each `TableInfo.table_constraints`
+  list. Two `duckdb_constraints()` queries per schema (one for
+  `PRIMARY KEY`, one for `FOREIGN KEY`) unnest the
+  `constraint_column_indexes` + `constraint_column_names` (and
+  `referenced_column_names` for FKs) so each row carries one column.
+  The result is grouped back up in Go and attached to the matching
+  `TableInfo`.
+- Foreign-key constraints carry a non-empty
+  `constraint_column_usage` list referencing the parent table's
+  schema/table/column.
+- SQL shape is a direct port of `gizmosql`'s
+  `DoGetPrimaryKeys` / `PrepareQueryForGetImportedOrExportedKeys`
+  (`gizmodata/gizmosql:src/duckdb/duckdb_server.cpp`).
+- Unit test verifies the JSON round-trip with a parent/child PK + FK
+  example. Python integration test creates real PK + FK tables and
+  asserts both constraint types come back with correct column usage.
+
+### Fixed — Python wheel CI
+
+- `pyproject.toml` no longer carries the
+  `License :: OSI Approved :: MIT License` classifier — modern
+  setuptools (≥77) rejects the combination of a PEP 639 `license`
+  expression and the legacy MIT classifier.
+- `setup.py` now skips the `shutil.copy` when
+  `ADBC_QUACK_LIBRARY` already points at the package source target
+  (previously raised `shutil.SameFileError`).
+- Python CI matrix expanded from `[3.10, 3.12]` to
+  `[3.10, 3.11, 3.12]`.
+
+### Added — README badges
+
+PyPI version, Python versions (queried from PyPI metadata), Go
+module tag, Go CI status, Python CI status, GitHub repo link, and
+MIT license — all at the top of the project README.
+
 ### Added — GetInfo and GetObjects metadata methods
 
 - `Connection.GetInfo(infoCodes)` now returns a real
