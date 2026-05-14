@@ -19,12 +19,12 @@ jobs:
             goos: linux
             goarch: amd64
             ext: so
-          - os: macos
-            arch: x86_64
-            runner: macos-13
-            goos: darwin
-            goarch: amd64
-            ext: dylib
+          - os: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+            ext: so
           - os: macos
             arch: arm64
             runner: macos-latest

@@ -9,10 +9,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [0.1.0-alpha.1] — 2026-05-14
 
 First publishable release. Wheels + sdist on PyPI, Go module tag
-`v0.1.0-alpha.1`, c-shared libraries (linux x86_64, macOS x86_64 +
-arm64, windows x86_64) attached to the GitHub Release with
+`v0.1.0-alpha.1`, c-shared libraries (linux x86_64, linux arm64,
+macOS arm64, windows x86_64) attached to the GitHub Release with
 `SHA256SUMS`. Cuts the line between "internal scaffolding" and
 "users can `pip install adbc-driver-quack`."
+
+**Platform note:** macOS x86_64 (Intel) and linux/macOS 32-bit are
+not built in this release. Apple silicon (arm64) is the present-day
+default for Mac developers; Intel Mac users can build locally via
+`go build -buildmode=c-shared` and point `ADBC_QUACK_LIBRARY` at the
+result before `pip install`.
 
 ### Added — Nested types (LIST / STRUCT / ARRAY / MAP)
 
