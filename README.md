@@ -3,6 +3,7 @@
 **An [Apache Arrow ADBC](https://arrow.apache.org/adbc/) driver for [DuckDB's Quack remote protocol](https://duckdb.org/docs/current/quack/overview).**
 
 [![PyPI](https://img.shields.io/pypi/v/adbc-driver-quack?label=PyPI&logo=pypi&logoColor=white&color=blue)](https://pypi.org/project/adbc-driver-quack/)
+[![PyPI downloads](https://img.shields.io/pypi/dm/adbc-driver-quack?label=downloads&logo=pypi&logoColor=white)](https://pypistats.org/packages/adbc-driver-quack)
 [![Python versions](https://img.shields.io/pypi/pyversions/adbc-driver-quack?label=Python&logo=python&logoColor=white)](https://pypi.org/project/adbc-driver-quack/)
 [![Go module](https://img.shields.io/github/v/tag/gizmodata/adbc-driver-quack?label=Go%20module&logo=go&logoColor=white&sort=semver)](https://pkg.go.dev/github.com/gizmodata/adbc-driver-quack)
 [![CI](https://github.com/gizmodata/adbc-driver-quack/actions/workflows/python.yml/badge.svg)](https://github.com/gizmodata/adbc-driver-quack/actions/workflows/python.yml)
