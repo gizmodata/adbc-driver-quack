@@ -6,7 +6,7 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/adbc-driver-quack?label=Python&logo=python&logoColor=white)](https://pypi.org/project/adbc-driver-quack/)
 [![Go module](https://img.shields.io/github/v/tag/gizmodata/adbc-driver-quack?label=Go%20module&logo=go&logoColor=white&sort=semver)](https://pkg.go.dev/github.com/gizmodata/adbc-driver-quack)
 [![Go CI](https://github.com/gizmodata/adbc-driver-quack/actions/workflows/go.yml/badge.svg)](https://github.com/gizmodata/adbc-driver-quack/actions/workflows/go.yml)
-[![Python CI](https://github.com/gizmodata/adbc-driver-quack/actions/workflows/python.yml/badge.svg)](https://github.com/gizmodata/adbc-driver-quack/actions/workflows/python.yml)
+[![CI](https://github.com/gizmodata/adbc-driver-quack/actions/workflows/python.yml/badge.svg)](https://github.com/gizmodata/adbc-driver-quack/actions/workflows/python.yml)
 [![GitHub Repo](https://img.shields.io/badge/github-gizmodata%2Fadbc--driver--quack-181717?logo=github)](https://github.com/gizmodata/adbc-driver-quack)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 

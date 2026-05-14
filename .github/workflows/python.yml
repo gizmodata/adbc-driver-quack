@@ -1,4 +1,4 @@
-name: Python
+name: CI
 
 on:
   push:
@@ -6,6 +6,15 @@ on:
     tags: ['v*']
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+# One workflow, one DAG:
+#   test   → wheels   → publish  → github-release
+#
+# - test runs on every PR, branch push, and tag push (5 Pythons × 3 OS)
+# - wheels run only on tag push, gated on test passing across the matrix
+# - publish (PyPI) and github-release run only on tag push, gated on
+#   all wheels building successfully
 
 jobs:
   test:
@@ -70,8 +79,8 @@ jobs:
       - name: Upload c-shared driver library
         # Only upload once per OS — every python version produces the
         # same binary so we keep the 3.12 build to avoid duplicates.
-        # (Use 3.12 specifically because that's the version packaging.yml
-        # also uses for wheel builds.)
+        # (Use 3.12 specifically because that's the version the wheel
+        # job below uses.)
         if: matrix.python == '3.12' && matrix.os != 'windows-latest'
         uses: actions/upload-artifact@v4
         with:
@@ -85,3 +94,152 @@ jobs:
         with:
           name: pytest-${{ matrix.os }}-${{ matrix.python }}
           path: python/*.log
+
+  wheels:
+    name: Wheel ${{ matrix.os }} ${{ matrix.arch }}
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: x86_64
+            runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            ext: so
+          - os: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+            ext: so
+          - os: macos
+            arch: arm64
+            runner: macos-latest
+            goos: darwin
+            goarch: arm64
+            ext: dylib
+          - os: windows
+            arch: x86_64
+            runner: windows-latest
+            goos: windows
+            goarch: amd64
+            ext: dll
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build c-shared driver library
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '1'
+        run: |
+          go build -buildmode=c-shared -tags driverlib \
+            -o "pkg/quack/libadbc_driver_quack.${{ matrix.ext }}" ./pkg/quack
+          echo "ADBC_QUACK_LIBRARY=$PWD/pkg/quack/libadbc_driver_quack.${{ matrix.ext }}" >> "$GITHUB_ENV"
+
+      - name: Build wheel
+        shell: bash
+        run: |
+          cd python
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+          ls -la dist/
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.os }}-${{ matrix.arch }}
+          path: python/dist/*.whl
+
+      - name: Stage c-shared library + checksum for release
+        shell: bash
+        run: |
+          mkdir -p release-artifacts
+          base="libadbc_driver_quack-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.ext }}"
+          cp "pkg/quack/libadbc_driver_quack.${{ matrix.ext }}" "release-artifacts/${base}"
+          if command -v sha256sum > /dev/null 2>&1; then
+            (cd release-artifacts && sha256sum "${base}" > "${base}.sha256")
+          else
+            (cd release-artifacts && shasum -a 256 "${base}" > "${base}.sha256")
+          fi
+
+      - name: Upload c-shared library artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libadbc_driver_quack-release-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: release-artifacts/*
+
+  publish:
+    name: Publish to PyPI
+    needs: wheels
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/adbc-driver-quack
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Stage wheels for PyPI
+        run: |
+          mkdir -p dist
+          # Wheels live under artifacts/wheel-<os>-<arch>/*.whl
+          find artifacts -type d -name 'wheel-*' -exec cp -r {}/. dist/ \;
+          ls -la dist/
+
+      - name: Publish to PyPI via OIDC trusted publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          skip-existing: true
+
+  github-release:
+    name: Attach c-shared libraries to GitHub Release
+    needs: wheels
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Stage c-shared library bundle
+        run: |
+          mkdir -p release-bundle
+          find artifacts -type d -name 'libadbc_driver_quack-release-*' -exec cp -r {}/. release-bundle/ \;
+          # One combined checksum manifest across every platform.
+          (cd release-bundle && find . -type f -name 'libadbc_driver_quack-*' \
+             ! -name '*.sha256' -exec sha256sum {} \; > SHA256SUMS) \
+             || (cd release-bundle && find . -type f -name 'libadbc_driver_quack-*' \
+                  ! -name '*.sha256' -exec shasum -a 256 {} \; > SHA256SUMS)
+          ls -la release-bundle/
+
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-bundle/libadbc_driver_quack-*
+            release-bundle/SHA256SUMS
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref, '-alpha') || contains(github.ref, '-beta') || contains(github.ref, '-rc') }}
