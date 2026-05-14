@@ -50,29 +50,39 @@ def _driver_path() -> str:
     except ImportError:  # pragma: no cover
         import importlib_resources as resources  # type: ignore[import-not-found]
 
+    import os
     import sys
 
     if sys.platform == "darwin":
         candidates = ("libadbc_driver_quack.dylib",)
     elif sys.platform.startswith("win"):
-        candidates = ("adbc_driver_quack.dll", "libadbc_driver_quack.dll")
+        candidates = ("libadbc_driver_quack.dll", "adbc_driver_quack.dll")
     else:
         candidates = ("libadbc_driver_quack.so",)
 
+    # resources.as_file() does NOT verify that the file exists on disk
+    # (it only handles extraction from zip-backed resources), so we have
+    # to check explicitly. Otherwise a stale stringified path is fed to
+    # ADBC's driver manager, which on Windows misparses the drive-letter
+    # colon as a `name:entrypoint` separator and reports the cryptic
+    # "Could not load `D`" error.
     pkg = resources.files("adbc_driver_quack")
-    last_error: Exception | None = None
+    tried: list[str] = []
     for name in candidates:
         try:
             with resources.as_file(pkg / name) as path:
-                return str(path)
-        except (FileNotFoundError, ModuleNotFoundError) as exc:
-            last_error = exc
+                resolved = str(path)
+                if os.path.isfile(resolved):
+                    return resolved
+                tried.append(resolved)
+        except (FileNotFoundError, ModuleNotFoundError):
+            tried.append(name)
 
     raise FileNotFoundError(
         "Could not locate the bundled Quack ADBC driver shared library. "
         "Rebuild the wheel with ADBC_QUACK_LIBRARY pointing at "
-        "libadbc_driver_quack.{so,dylib,dll}. Last error: "
-        f"{last_error!r}"
+        "libadbc_driver_quack.{so,dylib,dll}. Looked for: "
+        + ", ".join(tried)
     )
 
 

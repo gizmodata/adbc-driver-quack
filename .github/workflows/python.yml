@@ -101,9 +101,7 @@ jobs:
       - name: Install Python wheel from source tree
         run: |
           python -m pip install --upgrade pip
-          # -v so setup.py's diagnostic stderr lines surface in CI logs
-          # (helps debug the cgo-library copy/install path).
-          python -m pip install -e ".[test]" -v
+          python -m pip install -e ".[test]"
 
       - name: Run Python tests
         run: pytest -v -m integration

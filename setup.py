@@ -52,61 +52,24 @@ def _normalize_library_path(p: str) -> str:
 library = os.environ.get("ADBC_QUACK_LIBRARY")
 target = package_dir / f"libadbc_driver_quack.{_library_suffix()}"
 
-# Make print/error output visible during pip install (pip otherwise
-# swallows it on success). Write to a side-channel log so we can read it
-# back from the runner.
-import sys as _sys
-
-_log_lines: list[str] = []
-
-
-def _say(msg: str) -> None:
-    _log_lines.append(msg)
-    print(msg, file=_sys.stderr, flush=True)
-
-
-_say(f"setup.py: __file__={__file__}")
-_say(f"setup.py: source_root={source_root}")
-_say(f"setup.py: package_dir={package_dir}  exists={package_dir.is_dir()}")
-_say(f"setup.py: ADBC_QUACK_LIBRARY={library!r}")
-_say(f"setup.py: target={target}  exists_before={target.exists()}")
-
 if library:
-    normalized = _normalize_library_path(library)
-    if normalized != library:
-        _say(f"setup.py: normalized MSYS path -> {normalized}")
-    library = normalized
+    library = _normalize_library_path(library)
     library_path = Path(library).resolve()
-    _say(f"setup.py: resolved library_path={library_path}  exists={library_path.is_file()}")
     if not library_path.is_file():
         raise ValueError(
             f"ADBC_QUACK_LIBRARY points at {library_path!r} but no file is there. "
             f"Original env value: {os.environ.get('ADBC_QUACK_LIBRARY')!r}"
         )
-    if library_path != target.resolve() if target.exists() else target:
+    if not target.exists() or library_path != target.resolve():
         shutil.copy(library_path, target)
-        _say(f"setup.py: copied {library_path} -> {target}")
-    else:
-        _say(f"setup.py: ADBC_QUACK_LIBRARY already points at {target}; no copy needed.")
 elif os.environ.get("_ADBC_IS_SDIST", "").strip().lower() in ("1", "true"):
-    _say("setup.py: building sdist — skipping ADBC_QUACK_LIBRARY check.")
-elif target.is_file():
-    _say(f"setup.py: using pre-existing driver library at {target}.")
-else:
+    pass  # building sdist — skip the ADBC_QUACK_LIBRARY check
+elif not target.is_file():
     raise ValueError(
         "ADBC_QUACK_LIBRARY env var is required when building a wheel "
         "(it should point to the libadbc_driver_quack.{so,dylib,dll} "
         "produced by `make -C pkg/quack`)."
     )
-
-# Final sanity: after the conditional branches above, the target MUST exist.
-# Otherwise something is wrong with our copy or environment.
-if not target.is_file():
-    raise RuntimeError(
-        f"setup.py: target file {target} still missing after install logic. "
-        f"Log:\n  " + "\n  ".join(_log_lines)
-    )
-_say(f"setup.py: OK — target {target} present ({target.stat().st_size} bytes)")
 
 
 def _read_version(pkg_path: Path) -> str:
