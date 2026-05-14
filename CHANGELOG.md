@@ -6,6 +6,33 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — Python integration tests (11/11 passing locally)
+
+- `Connection.GetInfo` and `Connection.GetObjects` are now properly
+  wired to `getInfoImpl` / `getObjectsImpl` (an earlier commit left
+  them stubbed as `NotImplemented` because the routing edit didn't
+  apply). All ADBC metadata calls now go through to the real
+  implementations.
+- `python/adbc_driver_quack/dbapi.py` now constructs the DBAPI
+  `Connection` via the correct three-step pattern
+  (`AdbcDatabase` → `AdbcConnection` → `dbapi.Connection`) and
+  re-exports the standard DBAPI 2.0 module-level constants and
+  exception hierarchy. The previous one-step constructor call hit
+  `TypeError: Connection.__init__() missing 1 required positional
+  argument: 'conn'`.
+- Python `test_smoke.py` was rewritten against the actual
+  `adbc_driver_manager.dbapi` API surface:
+  * `adbc_get_table_types()` returns a `list[str]` (no context manager).
+  * `adbc_get_info()` returns a `dict[str|int, Any]` directly.
+  * `adbc_get_objects()` returns a `pyarrow.RecordBatchReader`,
+    iterated but not with-managed.
+  * `test_bulk_ingest` casts the `SUM` result to `BIGINT` to dodge
+    the HUGEINT-as-string surface.
+  * `test_bad_token_rejected` wraps the `connect()` call (which
+    is where the handshake error surfaces) in `pytest.raises`.
+- Python CI matrix expanded from `[3.10, 3.12]` to
+  `[3.10, 3.11, 3.12]` (an earlier edit didn't land).
+
 ### Added — Table constraints (PK + FK) in `GetObjects`
 
 - `getObjectsImpl` now populates each `TableInfo.table_constraints`
