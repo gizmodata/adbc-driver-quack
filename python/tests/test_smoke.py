@@ -93,6 +93,70 @@ def test_typed_arrow_columns(quack_server):
         assert schema.field("s").type == pa.string()
 
 
+def test_get_info(quack_server):
+    """GetInfo should return vendor + driver name/version."""
+    with _connect(quack_server) as conn:
+        with conn.adbc_get_info() as info_iter:
+            collected: dict[int, object] = {}
+            for batch in info_iter:
+                for row in batch.to_pylist():
+                    code = row["info_name"]
+                    value = row["info_value"]
+                    # info_value is a union; pyarrow surfaces it as a dict
+                    if isinstance(value, dict):
+                        for v in value.values():
+                            if v is not None:
+                                collected[code] = v
+                                break
+                    else:
+                        collected[code] = value
+    # info_name 0 = VendorName, 100 = DriverName
+    assert collected.get(0), f"VendorName missing — got {collected}"
+    assert "DuckDB" in str(collected[0])
+    assert collected.get(100), f"DriverName missing — got {collected}"
+    assert "Quack" in str(collected[100])
+
+
+def test_get_objects_catalogs_depth(quack_server):
+    """ObjectDepthCatalogs returns just catalog names with empty schemas lists."""
+    with _connect(quack_server) as conn:
+        with conn.adbc_get_objects(depth="catalogs") as it:
+            rows = []
+            for batch in it:
+                rows.extend(batch.to_pylist())
+    assert len(rows) >= 1
+    assert any(r["catalog_name"] == "memory" for r in rows), f"no memory catalog: {rows}"
+    # depth=catalogs should produce empty schemas lists
+    for r in rows:
+        assert r["catalog_db_schemas"] == []
+
+
+def test_get_objects_all_depth_lists_tables(quack_server):
+    """ObjectDepthAll should produce table + column info for our test table."""
+    with _connect(quack_server) as conn, conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS adbc_it_objects_probe")
+        cur.execute("CREATE TABLE adbc_it_objects_probe (id INTEGER, name VARCHAR)")
+        try:
+            with conn.adbc_get_objects(
+                depth="all", table_name_filter="adbc_it_objects_probe"
+            ) as it:
+                rows = []
+                for batch in it:
+                    rows.extend(batch.to_pylist())
+            tables = [
+                t
+                for r in rows
+                for s in r.get("catalog_db_schemas") or []
+                for t in s.get("db_schema_tables") or []
+            ]
+            ours = [t for t in tables if t["table_name"] == "adbc_it_objects_probe"]
+            assert ours, f"adbc_it_objects_probe missing in {tables!r}"
+            col_names = {c["column_name"] for c in ours[0].get("table_columns") or []}
+            assert "id" in col_names and "name" in col_names, f"columns: {col_names}"
+        finally:
+            cur.execute("DROP TABLE adbc_it_objects_probe")
+
+
 def test_bad_token_rejected(quack_server):
     import adbc_driver_quack.dbapi
 
