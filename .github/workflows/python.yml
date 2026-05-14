@@ -274,3 +274,23 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref, '-alpha') || contains(github.ref, '-beta') || contains(github.ref, '-rc') }}
+
+  pkgsite-warm:
+    name: Warm pkg.go.dev cache
+    needs: [publish, github-release]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger pkg.go.dev fetch
+        # pkg.go.dev indexes Go modules on demand — the first visitor to
+        # github.com/gizmodata/adbc-driver-quack@<new tag> would otherwise
+        # see the "Fetch" stub page. POSTing to the same fetch endpoint
+        # the page's "Request" button uses warms the cache for everyone.
+        # `|| true` because the endpoint isn't a contractually stable
+        # public API, and pkg.go.dev rate-limits during heavy load.
+        run: |
+          ref="${GITHUB_REF_NAME}"
+          curl -sS -X POST \
+            "https://pkg.go.dev/fetch/github.com/gizmodata/adbc-driver-quack@${ref}" \
+            -o /dev/null -w "pkg.go.dev fetch (${ref}): HTTP %{http_code} in %{time_total}s\n" \
+            || true
