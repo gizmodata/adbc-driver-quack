@@ -110,12 +110,12 @@ func (c *connectionImpl) GetObjects(_ context.Context, depth adbc.ObjectDepth, c
 	return nil, errStatus(adbc.StatusNotImplemented, "GetObjects")
 }
 
-func (c *connectionImpl) GetTableSchema(_ context.Context, catalog, dbSchema *string, tableName string) (*arrow.Schema, error) {
-	return nil, errStatus(adbc.StatusNotImplemented, "GetTableSchema")
+func (c *connectionImpl) GetTableSchema(ctx context.Context, catalog, dbSchema *string, tableName string) (*arrow.Schema, error) {
+	return c.getTableSchemaImpl(ctx, catalog, dbSchema, tableName)
 }
 
-func (c *connectionImpl) GetTableTypes(_ context.Context) (array.RecordReader, error) {
-	return nil, errStatus(adbc.StatusNotImplemented, "GetTableTypes")
+func (c *connectionImpl) GetTableTypes(ctx context.Context) (array.RecordReader, error) {
+	return c.getTableTypesImpl(ctx)
 }
 
 func (c *connectionImpl) Commit(_ context.Context) error                            { return nil }
@@ -127,15 +127,32 @@ func (c *connectionImpl) ReadPartition(context.Context, []byte) (array.RecordRea
 
 // statementImpl implements adbc.Statement.
 type statementImpl struct {
-	conn   *connectionImpl
-	alloc  memory.Allocator
-	sql    string
-	closed bool
+	conn         *connectionImpl
+	alloc        memory.Allocator
+	sql          string
+	closed       bool
+	targetTable  string
+	targetSchema string
+	bound        arrow.Record
+	boundStream  array.RecordReader
 }
 
-func (s *statementImpl) Close() error                  { s.closed = true; return nil }
-func (s *statementImpl) SetSqlQuery(sql string) error  { s.sql = sql; return nil }
-func (s *statementImpl) SetOption(string, string) error { return nil }
+func (s *statementImpl) Close() error {
+	s.closed = true
+	s.clearBound()
+	return nil
+}
+
+func (s *statementImpl) SetSqlQuery(sql string) error { s.sql = sql; return nil }
+func (s *statementImpl) SetOption(key, value string) error {
+	switch key {
+	case adbc.OptionKeyIngestTargetTable:
+		s.targetTable = value
+	case adbc.OptionValueIngestTargetDBSchema:
+		s.targetSchema = value
+	}
+	return nil
+}
 func (s *statementImpl) SetSubstraitPlan([]byte) error {
 	return errStatus(adbc.StatusNotImplemented, "Substrait")
 }
@@ -157,6 +174,11 @@ func (s *statementImpl) ExecuteQuery(ctx context.Context) (array.RecordReader, i
 }
 
 func (s *statementImpl) ExecuteUpdate(ctx context.Context) (int64, error) {
+	// Bulk-ingest path: when a target table is set and there's bound data,
+	// route to executeIngest instead of running a SQL update.
+	if s.targetTable != "" && (s.bound != nil || s.boundStream != nil) {
+		return s.executeIngest(ctx)
+	}
 	if s.sql == "" {
 		return -1, errStatus(adbc.StatusInvalidState, "Statement.ExecuteUpdate: no SQL set")
 	}
@@ -175,12 +197,14 @@ func (s *statementImpl) GetParameterSchema() (*arrow.Schema, error) {
 	return nil, errStatus(adbc.StatusNotImplemented, "GetParameterSchema")
 }
 
-func (s *statementImpl) Bind(context.Context, arrow.Record) error {
-	return errStatus(adbc.StatusNotImplemented, "Bind (use BindStream + ExecuteUpdate for bulk ingest once implemented)")
+func (s *statementImpl) Bind(_ context.Context, rec arrow.Record) error {
+	s.bindBatch(rec)
+	return nil
 }
 
-func (s *statementImpl) BindStream(context.Context, array.RecordReader) error {
-	return errStatus(adbc.StatusNotImplemented, "BindStream")
+func (s *statementImpl) BindStream(_ context.Context, rr array.RecordReader) error {
+	s.bindStream(rr)
+	return nil
 }
 
 func (s *statementImpl) ExecutePartitions(context.Context) (*arrow.Schema, adbc.Partitions, int64, error) {
