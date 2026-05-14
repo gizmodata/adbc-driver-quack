@@ -120,6 +120,17 @@ FROM duckdb_views()
 		return nil, err
 	}
 
+	// Load the full set of constraints for the schema once (two queries)
+	// rather than per-table. Most schemas have few constraints; one round
+	// trip per schema is cheaper than one per table.
+	var constraintsByTable map[string][]constraintInfo
+	if includeColumns {
+		constraintsByTable, err = c.loadConstraintsForSchema(ctx, catalog, schema)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	out := make([]tableInfo, 0, len(tableRows))
 	for _, t := range tableRows {
 		info := tableInfo{
@@ -134,6 +145,9 @@ FROM duckdb_views()
 				return nil, err
 			}
 			info.TableColumns = cols
+			if cs, ok := constraintsByTable[t.name]; ok {
+				info.TableConstraints = cs
+			}
 		}
 		out = append(out, info)
 	}

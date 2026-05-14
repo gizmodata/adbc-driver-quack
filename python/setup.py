@@ -33,7 +33,11 @@ library = os.environ.get("ADBC_QUACK_LIBRARY")
 target = package_dir / f"libadbc_driver_quack.{_library_suffix()}"
 
 if library:
-    shutil.copy(library, target)
+    library_path = Path(library).resolve()
+    if library_path != target.resolve() if target.exists() else target:
+        shutil.copy(library_path, target)
+    else:
+        print(f"ADBC_QUACK_LIBRARY already points at {target}; no copy needed.")
 elif os.environ.get("_ADBC_IS_SDIST", "").strip().lower() in ("1", "true"):
     print("Building sdist — skipping ADBC_QUACK_LIBRARY check.")
 elif target.is_file():

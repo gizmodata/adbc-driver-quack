@@ -157,6 +157,53 @@ def test_get_objects_all_depth_lists_tables(quack_server):
             cur.execute("DROP TABLE adbc_it_objects_probe")
 
 
+def test_get_objects_returns_primary_and_foreign_keys(quack_server):
+    """Verify table_constraints carries PK + FK info for a parent/child pair."""
+    with _connect(quack_server) as conn, conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS adbc_it_orders")
+        cur.execute("DROP TABLE IF EXISTS adbc_it_users")
+        cur.execute("CREATE TABLE adbc_it_users (id INTEGER PRIMARY KEY, name VARCHAR)")
+        cur.execute(
+            "CREATE TABLE adbc_it_orders (order_id INTEGER PRIMARY KEY, "
+            "user_id INTEGER REFERENCES adbc_it_users(id), amount DOUBLE)"
+        )
+        try:
+            with conn.adbc_get_objects(
+                depth="all",
+                table_name_filter="adbc_it_%",
+            ) as it:
+                rows = []
+                for batch in it:
+                    rows.extend(batch.to_pylist())
+            by_table = {
+                t["table_name"]: t
+                for r in rows
+                for s in r.get("catalog_db_schemas") or []
+                for t in s.get("db_schema_tables") or []
+                if t["table_name"].startswith("adbc_it_")
+            }
+            assert "adbc_it_users" in by_table, f"missing users table; got {list(by_table)}"
+            assert "adbc_it_orders" in by_table, f"missing orders table; got {list(by_table)}"
+
+            users_cs = by_table["adbc_it_users"].get("table_constraints") or []
+            pks = [c for c in users_cs if c["constraint_type"] == "PRIMARY KEY"]
+            assert pks, f"no PK on users: {users_cs!r}"
+            assert "id" in pks[0]["constraint_column_names"]
+
+            orders_cs = by_table["adbc_it_orders"].get("table_constraints") or []
+            fks = [c for c in orders_cs if c["constraint_type"] == "FOREIGN KEY"]
+            assert fks, f"no FK on orders: {orders_cs!r}"
+            assert "user_id" in fks[0]["constraint_column_names"]
+            usages = fks[0].get("constraint_column_usage") or []
+            assert any(
+                u["fk_table"] == "adbc_it_users" and u["fk_column_name"] == "id"
+                for u in usages
+            ), f"expected usage referencing users.id, got {usages!r}"
+        finally:
+            cur.execute("DROP TABLE IF EXISTS adbc_it_orders")
+            cur.execute("DROP TABLE IF EXISTS adbc_it_users")
+
+
 def test_bad_token_rejected(quack_server):
     import adbc_driver_quack.dbapi
 
