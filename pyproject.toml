@@ -7,6 +7,20 @@ license-files = ["LICENSE"]
 readme = "README.md"
 requires-python = ">=3.10"
 dynamic = ["version"]
+keywords = [
+    "adbc",
+    "adbc-driver",
+    "apache-arrow",
+    "arrow",
+    "columnar",
+    "database",
+    "duckdb",
+    "gizmodata",
+    "olap",
+    "pyarrow",
+    "quack",
+    "sql",
+]
 dependencies = [
     "adbc-driver-manager >=1.0.0",
     "importlib-resources >=1.3",
