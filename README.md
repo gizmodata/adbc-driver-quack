@@ -74,6 +74,32 @@ import polars as pl
 df = pl.from_arrow(table)
 ```
 
+#### Alternative: drive `adbc_driver_manager` directly
+
+If you prefer the [adbc-quickstarts](https://github.com/columnar-tech/adbc-quickstarts)
+idiom — passing the driver to `adbc_driver_manager.dbapi.connect` rather
+than going through our wrapper — point at the bundled shared library via
+`_driver_path()`:
+
+```python
+from adbc_driver_manager import dbapi
+import adbc_driver_quack
+
+with dbapi.connect(
+    driver=adbc_driver_quack._driver_path(),
+    entrypoint="QuackDriverInit",
+    db_kwargs={
+        "uri": "quack://127.0.0.1:9494",
+        "adbc.quack.token": "my-secret-token",
+    },
+) as conn, conn.cursor() as cur:
+    cur.execute("SELECT 42 AS answer")
+    table = cur.fetch_arrow_table()
+```
+
+Both styles work the same on the wire — pick whichever reads better for
+your codebase.
+
 ### Streaming large result sets
 
 `Cursor.fetch_record_batch()` returns a `pyarrow.RecordBatchReader` that
