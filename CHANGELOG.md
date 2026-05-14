@@ -8,8 +8,30 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.1.0-alpha.2] — 2026-05-14
 
-Fixes the Windows wheel (which was broken in `0.1.0-alpha.1`).
-`0.1.0-alpha.1` is yanked from PyPI.
+Fixes the Windows wheel (which was broken in `0.1.0-alpha.1`) and
+puts the rich README on PyPI. `0.1.0-alpha.1` is yanked from PyPI.
+
+### Changed — `pyproject.toml` and `setup.py` moved to repo root
+
+- The Python build files are now at the repo root, matching the
+  convention used by `adbc-driver-gizmosql` and `ibis-gizmosql`. The
+  driving reason was the PyPI README: setuptools refuses to read
+  `../README.md` (security sandbox), so the only clean way to ship
+  the rich repo README to PyPI was to have `pyproject.toml` sit
+  alongside it.
+- The Python package source still lives in `python/adbc_driver_quack/`
+  — that's wired up via `[tool.setuptools] packages = ["adbc_driver_quack"]`
+  and `package-dir = { "" = "python" }`.
+- Tests still live in `python/tests/`; `[tool.pytest.ini_options]
+  testpaths = ["python/tests"]` keeps them discoverable.
+- `python.yml` simplified: no more `cd python` in the install / test /
+  wheel-build steps. `pip install -e ".[test]"` and `pytest` now run
+  from the repo root.
+- The PyPI project page now renders the full README — badges,
+  3-step quickstart, alt-pattern snippet, streaming/ingest/tx
+  examples, and connection-URL table — instead of a 40-line stub.
+- One small README edit: the `[MIT](LICENSE)` link is now an
+  absolute GitHub URL so PyPI's renderer can resolve it.
 
 ### Fixed — Windows wheel: MSYS path translation
 

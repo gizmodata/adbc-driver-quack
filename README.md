@@ -207,4 +207,4 @@ packages in [`quack-jdbc`](https://github.com/gizmodata/quack-jdbc).
 
 ## License
 
-[MIT](LICENSE) — see `LICENSE` for full attribution.
+[MIT](https://github.com/gizmodata/adbc-driver-quack/blob/main/LICENSE) — see `LICENSE` for full attribution.

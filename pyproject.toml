@@ -3,7 +3,7 @@ name = "adbc-driver-quack"
 description = "An Apache Arrow ADBC driver for DuckDB's Quack remote protocol."
 authors = [{ name = "GizmoData", email = "support@gizmodata.com" }]
 license = "MIT"
-license-files = ["LICENSE", "README.md"]
+license-files = ["LICENSE"]
 readme = "README.md"
 requires-python = ">=3.10"
 dynamic = ["version"]
@@ -41,10 +41,15 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 include-package-data = true
+# Python sources live under python/ so the repo can be polyglot (Go at
+# the root, Python here, cgo wrapper in pkg/quack/). Be explicit about
+# what we package — auto-find would also sweep up python/tests/.
 packages = ["adbc_driver_quack"]
+package-dir = { "" = "python" }
 
 [tool.pytest.ini_options]
 xfail_strict = true
+testpaths = ["python/tests"]
 markers = [
     "integration: requires a live duckdb+quack server (started by conftest.py)",
 ]

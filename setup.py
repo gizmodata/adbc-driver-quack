@@ -5,6 +5,9 @@ The Go-built c-shared library must be copied into the package source
 tree before the wheel is built. The path to the library is passed
 via the ``ADBC_QUACK_LIBRARY`` environment variable, mirroring the
 adbc-driver-flightsql convention.
+
+Lives at the repo root (not under python/) so the PyPI README can
+just be ``README.md`` — no parent-directory reference or mirror dance.
 """
 
 import os
@@ -15,7 +18,7 @@ from pathlib import Path
 from setuptools import setup
 
 source_root = Path(__file__).parent
-package_dir = source_root / "adbc_driver_quack"
+package_dir = source_root / "python" / "adbc_driver_quack"
 
 
 def _library_suffix() -> str:
@@ -45,7 +48,7 @@ def _normalize_library_path(p: str) -> str:
     return p
 
 
-# Bundle the c-shared library produced by `make -C ../pkg/quack`.
+# Bundle the c-shared library produced by `make -C pkg/quack`.
 library = os.environ.get("ADBC_QUACK_LIBRARY")
 target = package_dir / f"libadbc_driver_quack.{_library_suffix()}"
 

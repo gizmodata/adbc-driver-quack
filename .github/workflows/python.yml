@@ -100,12 +100,11 @@ jobs:
 
       - name: Install Python wheel from source tree
         run: |
-          cd python
           python -m pip install --upgrade pip
           python -m pip install -e ".[test]"
 
       - name: Run Python tests
-        run: cd python && pytest -v -m integration
+        run: pytest -v -m integration
 
       - name: Upload c-shared driver library
         # Only upload once per OS — every python version produces the
@@ -124,7 +123,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pytest-${{ matrix.os }}-${{ matrix.python }}
-          path: python/*.log
+          path: |
+            *.log
+            python/*.log
 
   wheels:
     name: Wheel ${{ matrix.os }} ${{ matrix.arch }}
@@ -185,7 +186,6 @@ jobs:
       - name: Build wheel
         shell: bash
         run: |
-          cd python
           python -m pip install --upgrade pip build
           python -m build --wheel
           ls -la dist/
@@ -194,7 +194,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.os }}-${{ matrix.arch }}
-          path: python/dist/*.whl
+          path: dist/*.whl
 
       - name: Stage c-shared library + checksum for release
         shell: bash
