@@ -99,15 +99,15 @@ func (c *connectionImpl) NewStatement() (adbc.Statement, error) {
 	return &statementImpl{conn: c, alloc: c.alloc}, nil
 }
 
-// Defaulted implementations for read-path. Metadata methods are
-// stubbed; future commits port DuckDB JDBC's queries here.
+// Read-path metadata. Implementations live in metadata_info.go +
+// metadata_objects.go to keep driver.go focused on the public surface.
 
-func (c *connectionImpl) GetInfo(_ context.Context, codes []adbc.InfoCode) (array.RecordReader, error) {
-	return nil, errStatus(adbc.StatusNotImplemented, "GetInfo")
+func (c *connectionImpl) GetInfo(ctx context.Context, codes []adbc.InfoCode) (array.RecordReader, error) {
+	return c.getInfoImpl(ctx, codes)
 }
 
-func (c *connectionImpl) GetObjects(_ context.Context, depth adbc.ObjectDepth, catalog, dbSchema, tableName *string, columnName *string, tableTypes []string) (array.RecordReader, error) {
-	return nil, errStatus(adbc.StatusNotImplemented, "GetObjects")
+func (c *connectionImpl) GetObjects(ctx context.Context, depth adbc.ObjectDepth, catalog, dbSchema, tableName *string, columnName *string, tableTypes []string) (array.RecordReader, error) {
+	return c.getObjectsImpl(ctx, depth, catalog, dbSchema, tableName, columnName, tableTypes)
 }
 
 func (c *connectionImpl) GetTableSchema(ctx context.Context, catalog, dbSchema *string, tableName string) (*arrow.Schema, error) {

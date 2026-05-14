@@ -1,8 +1,10 @@
 """
 DBAPI 2.0 wrapper for the Quack ADBC driver.
 
-Thin re-export of ``adbc_driver_manager.dbapi`` with a ``connect`` shim
-that knows how to load the Quack shared library.
+Mirrors ``adbc_driver_flightsql.dbapi``: opens the underlying ADBC
+database via :func:`adbc_driver_quack.connect`, then wraps it in
+``adbc_driver_manager.AdbcConnection`` and ``adbc_driver_manager.dbapi.Connection``
+so callers get a standard DBAPI 2.0 :class:`Connection`.
 """
 
 from __future__ import annotations
@@ -14,14 +16,76 @@ import adbc_driver_manager.dbapi
 
 import adbc_driver_quack
 
+# Re-export DBAPI 2.0 module-level constants + exception hierarchy so callers
+# can write `import adbc_driver_quack.dbapi as dbapi; dbapi.Error` etc.
+apilevel = adbc_driver_manager.dbapi.apilevel
+threadsafety = adbc_driver_manager.dbapi.threadsafety
+paramstyle = "qmark"
+
+Warning = adbc_driver_manager.dbapi.Warning
+Error = adbc_driver_manager.dbapi.Error
+InterfaceError = adbc_driver_manager.dbapi.InterfaceError
+DatabaseError = adbc_driver_manager.dbapi.DatabaseError
+DataError = adbc_driver_manager.dbapi.DataError
+OperationalError = adbc_driver_manager.dbapi.OperationalError
+IntegrityError = adbc_driver_manager.dbapi.IntegrityError
+InternalError = adbc_driver_manager.dbapi.InternalError
+ProgrammingError = adbc_driver_manager.dbapi.ProgrammingError
+NotSupportedError = adbc_driver_manager.dbapi.NotSupportedError
+
+Date = adbc_driver_manager.dbapi.Date
+Time = adbc_driver_manager.dbapi.Time
+Timestamp = adbc_driver_manager.dbapi.Timestamp
+DateFromTicks = adbc_driver_manager.dbapi.DateFromTicks
+TimeFromTicks = adbc_driver_manager.dbapi.TimeFromTicks
+TimestampFromTicks = adbc_driver_manager.dbapi.TimestampFromTicks
+STRING = adbc_driver_manager.dbapi.STRING
+BINARY = adbc_driver_manager.dbapi.BINARY
+NUMBER = adbc_driver_manager.dbapi.NUMBER
+DATETIME = adbc_driver_manager.dbapi.DATETIME
+ROWID = adbc_driver_manager.dbapi.ROWID
+
+Connection = adbc_driver_manager.dbapi.Connection
+Cursor = adbc_driver_manager.dbapi.Cursor
+
+__all__ = [
+    "BINARY",
+    "Connection",
+    "Cursor",
+    "DATETIME",
+    "DataError",
+    "DatabaseError",
+    "Date",
+    "DateFromTicks",
+    "Error",
+    "IntegrityError",
+    "InterfaceError",
+    "InternalError",
+    "NUMBER",
+    "NotSupportedError",
+    "OperationalError",
+    "ProgrammingError",
+    "ROWID",
+    "STRING",
+    "Time",
+    "TimeFromTicks",
+    "Timestamp",
+    "TimestampFromTicks",
+    "Warning",
+    "apilevel",
+    "connect",
+    "paramstyle",
+    "threadsafety",
+]
+
 
 def connect(
     uri: str,
     *,
-    db_kwargs: typing.Mapping[str, str] | None = None,
-    conn_kwargs: typing.Mapping[str, str] | None = None,
+    db_kwargs: typing.Optional[typing.Mapping[str, str]] = None,
+    conn_kwargs: typing.Optional[typing.Mapping[str, str]] = None,
     autocommit: bool = False,
-) -> adbc_driver_manager.dbapi.Connection:
+) -> "Connection":
     """
     Open a DBAPI 2.0 :class:`Connection` against a Quack server.
 
@@ -36,7 +100,23 @@ def connect(
     conn_kwargs:
         Optional mapping of ADBC connection options.
     autocommit:
-        Forwarded to the underlying connection.
+        Forwarded to the underlying ``Connection``.
     """
-    db = adbc_driver_quack.connect(uri, db_kwargs=db_kwargs)
-    return adbc_driver_manager.dbapi.Connection(db, conn_kwargs=dict(conn_kwargs or {}), autocommit=autocommit)
+    db = None
+    conn = None
+    try:
+        db = adbc_driver_quack.connect(uri, db_kwargs=db_kwargs)
+        conn = adbc_driver_manager.AdbcConnection(db, **(conn_kwargs or {}))
+        return adbc_driver_manager.dbapi.Connection(db, conn, autocommit=autocommit)
+    except Exception:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+        raise

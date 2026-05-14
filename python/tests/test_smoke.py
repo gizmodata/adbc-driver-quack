@@ -50,21 +50,21 @@ def test_bulk_ingest(quack_server):
         })
         cur.adbc_ingest("adbc_it_ingest", table, mode="append")
 
-        cur.execute("SELECT COUNT(*) AS n, SUM(id) AS s FROM adbc_it_ingest")
+        # SUM(INTEGER) in DuckDB returns HUGEINT, which surfaces as a string
+        # via the driver (no native arrow Int128). Cast as a sanity check.
+        cur.execute("SELECT COUNT(*) AS n, CAST(SUM(id) AS BIGINT) AS s FROM adbc_it_ingest")
         row = cur.fetch_arrow_table().to_pylist()[0]
         assert row["n"] == 3
-        assert row["s"] == 60
+        assert int(row["s"]) == 60
         cur.execute("DROP TABLE adbc_it_ingest")
 
 
 def test_get_table_types(quack_server):
+    """adbc_get_table_types returns a list[str] directly."""
     with _connect(quack_server) as conn:
-        with conn.adbc_get_table_types() as types_iter:
-            types = set()
-            for batch in types_iter:
-                types.update(batch.to_pylist())
-        for expected in ("TABLE", "VIEW"):
-            assert expected in types, f"expected {expected!r}, got {types}"
+        types = set(conn.adbc_get_table_types())
+    for expected in ("TABLE", "VIEW"):
+        assert expected in types, f"expected {expected!r}, got {types}"
 
 
 def test_get_table_schema(quack_server):
@@ -94,39 +94,27 @@ def test_typed_arrow_columns(quack_server):
 
 
 def test_get_info(quack_server):
-    """GetInfo should return vendor + driver name/version."""
+    """adbc_get_info() returns a dict mapping info name -> value."""
     with _connect(quack_server) as conn:
-        with conn.adbc_get_info() as info_iter:
-            collected: dict[int, object] = {}
-            for batch in info_iter:
-                for row in batch.to_pylist():
-                    code = row["info_name"]
-                    value = row["info_value"]
-                    # info_value is a union; pyarrow surfaces it as a dict
-                    if isinstance(value, dict):
-                        for v in value.values():
-                            if v is not None:
-                                collected[code] = v
-                                break
-                    else:
-                        collected[code] = value
-    # info_name 0 = VendorName, 100 = DriverName
-    assert collected.get(0), f"VendorName missing — got {collected}"
-    assert "DuckDB" in str(collected[0])
-    assert collected.get(100), f"DriverName missing — got {collected}"
-    assert "Quack" in str(collected[100])
+        info = conn.adbc_get_info()
+    # Keys are either int codes or human-readable strings via _KNOWN_INFO_VALUES.
+    vendor_name = info.get("vendor_name") or info.get(0)
+    driver_name = info.get("driver_name") or info.get(100)
+    assert vendor_name, f"VendorName missing — got {info}"
+    assert "DuckDB" in str(vendor_name), f"unexpected vendor: {vendor_name!r}"
+    assert driver_name, f"DriverName missing — got {info}"
+    assert "Quack" in str(driver_name), f"unexpected driver: {driver_name!r}"
 
 
 def test_get_objects_catalogs_depth(quack_server):
-    """ObjectDepthCatalogs returns just catalog names with empty schemas lists."""
+    """adbc_get_objects(depth='catalogs') returns catalogs with empty schemas lists."""
     with _connect(quack_server) as conn:
-        with conn.adbc_get_objects(depth="catalogs") as it:
-            rows = []
-            for batch in it:
-                rows.extend(batch.to_pylist())
+        reader = conn.adbc_get_objects(depth="catalogs")
+        rows = []
+        for batch in reader:
+            rows.extend(batch.to_pylist())
     assert len(rows) >= 1
     assert any(r["catalog_name"] == "memory" for r in rows), f"no memory catalog: {rows}"
-    # depth=catalogs should produce empty schemas lists
     for r in rows:
         assert r["catalog_db_schemas"] == []
 
@@ -137,12 +125,12 @@ def test_get_objects_all_depth_lists_tables(quack_server):
         cur.execute("DROP TABLE IF EXISTS adbc_it_objects_probe")
         cur.execute("CREATE TABLE adbc_it_objects_probe (id INTEGER, name VARCHAR)")
         try:
-            with conn.adbc_get_objects(
+            reader = conn.adbc_get_objects(
                 depth="all", table_name_filter="adbc_it_objects_probe"
-            ) as it:
-                rows = []
-                for batch in it:
-                    rows.extend(batch.to_pylist())
+            )
+            rows = []
+            for batch in reader:
+                rows.extend(batch.to_pylist())
             tables = [
                 t
                 for r in rows
@@ -168,13 +156,13 @@ def test_get_objects_returns_primary_and_foreign_keys(quack_server):
             "user_id INTEGER REFERENCES adbc_it_users(id), amount DOUBLE)"
         )
         try:
-            with conn.adbc_get_objects(
+            reader = conn.adbc_get_objects(
                 depth="all",
                 table_name_filter="adbc_it_%",
-            ) as it:
-                rows = []
-                for batch in it:
-                    rows.extend(batch.to_pylist())
+            )
+            rows = []
+            for batch in reader:
+                rows.extend(batch.to_pylist())
             by_table = {
                 t["table_name"]: t
                 for r in rows
@@ -205,11 +193,13 @@ def test_get_objects_returns_primary_and_foreign_keys(quack_server):
 
 
 def test_bad_token_rejected(quack_server):
+    """A wrong token must raise during connect (server fails CONNECTION_REQUEST)."""
     import adbc_driver_quack.dbapi
 
-    bad = adbc_driver_quack.dbapi.connect(
-        quack_server.uri, db_kwargs={"adbc.quack.token": "wrong-token"}
-    )
     with pytest.raises(Exception):
-        with bad as conn, conn.cursor() as cur:
-            cur.execute("SELECT 1")
+        # The driver raises during AdbcConnection construction because the
+        # CONNECTION_REQUEST handshake gets rejected, so the wrapper is
+        # the call we expect to throw.
+        adbc_driver_quack.dbapi.connect(
+            quack_server.uri, db_kwargs={"adbc.quack.token": "wrong-token"}
+        )
