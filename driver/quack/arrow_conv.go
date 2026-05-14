@@ -68,8 +68,12 @@ func arrowType(t quacktype.LogicalType) arrow.DataType {
 	case quacktype.LogicalTypeIDUUID:
 		return &arrow.FixedSizeBinaryType{ByteWidth: 16}
 	case quacktype.LogicalTypeIDHugeInt, quacktype.LogicalTypeIDUHugeInt:
-		// No native 128-bit arrow int; represent as string.
-		return arrow.BinaryTypes.String
+		// Arrow has no native int128; map to Decimal128(38, 0) which fits
+		// any signed int128 exactly. UHUGEINT values above 10^38-1 lose
+		// precision — Decimal128's max precision is 38 vs uint128's 39
+		// decimal digits. Use a CAST in SQL when full unsigned range is
+		// needed; SUM(INTEGER) etc. comfortably fit.
+		return &arrow.Decimal128Type{Precision: 38, Scale: 0}
 	case quacktype.LogicalTypeIDInterval:
 		return arrow.FixedWidthTypes.MonthDayNanoInterval
 	}
@@ -262,13 +266,22 @@ func buildColumn(b array.Builder, t quacktype.LogicalType, vec message.DecodedVe
 		for i := 0; i < n; i++ {
 			if vec.IsNull(i) {
 				builder.AppendNull()
-			} else if r, ok := vec.GetObject(i).(*big.Rat); ok {
+				continue
+			}
+			v := vec.GetObject(i)
+			switch x := v.(type) {
+			case *big.Rat:
 				dt, _ := b.Type().(*arrow.Decimal128Type)
 				scaleFactor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(dt.Scale)), nil)
-				num := new(big.Int).Mul(r.Num(), scaleFactor)
-				unscaled := new(big.Int).Quo(num, r.Denom())
+				num := new(big.Int).Mul(x.Num(), scaleFactor)
+				unscaled := new(big.Int).Quo(num, x.Denom())
 				builder.Append(decimal128.FromBigInt(unscaled))
-			} else {
+			case *big.Int:
+				// HUGEINT / UHUGEINT path: the value is already an
+				// unscaled int128, so the Decimal128 representation is
+				// the int128 itself with scale=0.
+				builder.Append(decimal128.FromBigInt(x))
+			default:
 				builder.AppendNull()
 			}
 		}

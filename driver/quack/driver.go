@@ -215,7 +215,7 @@ func (c *connectionImpl) beginTx(ctx context.Context) error {
 // execNoResult runs a side-effectful SQL statement (BEGIN/COMMIT/ROLLBACK)
 // and discards the result chunks.
 func (c *connectionImpl) execNoResult(ctx context.Context, sql string) error {
-	_, err := c.sess.prepare(ctx, sql)
+	_, err := c.sess.drainPrepared(ctx, sql)
 	return err
 }
 
@@ -256,15 +256,18 @@ func (s *statementImpl) ExecuteQuery(ctx context.Context) (array.RecordReader, i
 	if s.sql == "" {
 		return nil, -1, errStatus(adbc.StatusInvalidState, "Statement.ExecuteQuery: no SQL set")
 	}
-	result, err := s.conn.sess.prepare(ctx, s.sql)
+	cur, err := s.conn.sess.cursor(ctx, s.sql)
 	if err != nil {
 		return nil, -1, fromTransportError(err)
 	}
-	rows, reader, err := buildRecordReader(s.alloc, result)
+	reader, err := newStreamingRecordReader(ctx, s.alloc, cur)
 	if err != nil {
-		return nil, -1, errStatus(adbc.StatusInternal, "buildRecordReader: %v", err)
+		cur.close()
+		return nil, -1, errStatus(adbc.StatusInternal, "newStreamingRecordReader: %v", err)
 	}
-	return reader, rows, nil
+	// Row count is unknown until the reader is fully drained; ADBC's
+	// contract allows -1 to mean "unknown".
+	return reader, -1, nil
 }
 
 func (s *statementImpl) ExecuteUpdate(ctx context.Context) (int64, error) {
@@ -276,7 +279,8 @@ func (s *statementImpl) ExecuteUpdate(ctx context.Context) (int64, error) {
 	if s.sql == "" {
 		return -1, errStatus(adbc.StatusInvalidState, "Statement.ExecuteUpdate: no SQL set")
 	}
-	result, err := s.conn.sess.prepare(ctx, s.sql)
+	// DDL/DML results are small (one Count row at most), so drain eagerly.
+	result, err := s.conn.sess.drainPrepared(ctx, s.sql)
 	if err != nil {
 		return -1, fromTransportError(err)
 	}
@@ -305,7 +309,11 @@ func (s *statementImpl) ExecutePartitions(context.Context) (*arrow.Schema, adbc.
 	return nil, adbc.Partitions{}, -1, errStatus(adbc.StatusNotImplemented, "ExecutePartitions")
 }
 
-func buildRecordReader(alloc memory.Allocator, result *PreparedResult) (int64, array.RecordReader, error) {
+// buildRecordReader is retained for callers (currently none) that have a
+// fully-drained result and want a RecordReader. The hot path now uses
+// newStreamingRecordReader via cursor.go to avoid materializing all
+// chunks up front.
+func buildRecordReader(alloc memory.Allocator, result *drainedResult) (int64, array.RecordReader, error) {
 	if alloc == nil {
 		alloc = memory.NewGoAllocator()
 	}
@@ -364,9 +372,9 @@ func fromTransportError(err error) error {
 
 // Compile-time interface checks.
 var (
-	_ adbc.Driver     = (*driverImpl)(nil)
-	_ adbc.Database   = (*databaseImpl)(nil)
-	_ adbc.Connection = (*connectionImpl)(nil)
-	_ adbc.Statement  = (*statementImpl)(nil)
+	_ adbc.Driver          = (*driverImpl)(nil)
+	_ adbc.Database        = (*databaseImpl)(nil)
+	_ adbc.Connection      = (*connectionImpl)(nil)
+	_ adbc.Statement       = (*statementImpl)(nil)
 	_ message.QuackMessage = message.ConnectionRequest{} // keep imports satisfied
 )

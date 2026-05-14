@@ -60,10 +60,14 @@ func (s *session) handshake(ctx context.Context) error {
 	return nil
 }
 
-// prepare runs a PREPARE_REQUEST and drains every FETCH_REQUEST chunk into a
-// single PreparedResult. (Future enhancement: stream chunks lazily via a Cursor
-// type, matching what we did in quack-jdbc.)
-func (s *session) prepare(ctx context.Context, sql string) (*PreparedResult, error) {
+// cursor opens a streaming cursor over a prepared query.
+//
+// Only the initial chunks delivered with PREPARE_RESPONSE are fetched
+// eagerly; subsequent chunks come back lazily as the caller drains the
+// cursor via nextChunk(). Peak driver memory for a million-row SELECT
+// is therefore bounded by the server's batch size, not the total
+// result-set row count.
+func (s *session) cursor(ctx context.Context, sql string) (*cursor, error) {
 	req := message.PrepareRequest{
 		Hdr: message.MessageHeader{
 			Type:          message.MessageTypePrepareRequest,
@@ -80,34 +84,132 @@ func (s *session) prepare(ctx context.Context, sql string) (*PreparedResult, err
 	if !ok {
 		return nil, fmt.Errorf("session: expected PREPARE_RESPONSE, got %T", resp)
 	}
-	result := &PreparedResult{
-		ColumnNames: pr.ResultNames,
-		ColumnTypes: pr.ResultTypes,
-		Chunks:      append([]message.DataChunk(nil), pr.Results...),
+	return &cursor{
+		sess:        s,
+		columnNames: pr.ResultNames,
+		columnTypes: pr.ResultTypes,
+		resultUUID:  pr.ResultUUID,
+		buffered:    append([]message.DataChunk(nil), pr.Results...),
+		needsMore:   pr.NeedsMoreFetch,
+	}, nil
+}
+
+// cursor is a streaming view over the chunks of one prepared query.
+type cursor struct {
+	sess        *session
+	columnNames []string
+	columnTypes []quacktype.LogicalType
+	resultUUID  codec.HugeIntParts
+	buffered    []message.DataChunk
+	needsMore   bool
+	closed      bool
+}
+
+// columnNamesCopy / columnTypesCopy return the result schema. Callers
+// should not mutate the returned slices.
+func (c *cursor) columnNamesSlice() []string                { return c.columnNames }
+func (c *cursor) columnTypesSlice() []quacktype.LogicalType { return c.columnTypes }
+
+// peekFirstChunk returns the first buffered chunk (if any) without
+// consuming it. Used by ExecuteUpdate / ExecuteQuery to detect the
+// 1-row "Count" result-shape that DuckDB returns for DDL/DML.
+func (c *cursor) peekFirstChunk() *message.DataChunk {
+	if len(c.buffered) == 0 {
+		return nil
 	}
-	more := pr.NeedsMoreFetch
-	uuid := pr.ResultUUID
-	for more {
-		freq := message.FetchRequest{
-			Hdr: message.MessageHeader{
-				Type:          message.MessageTypeFetchRequest,
-				ConnectionID:  s.connectionID,
-				ClientQueryID: s.nextQueryID(),
-			},
-			ResultUUID: uuid,
-		}
-		fresp, err := s.transport.Send(ctx, freq)
-		if err != nil {
-			return nil, fmt.Errorf("session: fetch: %w", err)
-		}
-		fr, ok := fresp.(message.FetchResponse)
-		if !ok {
-			return nil, fmt.Errorf("session: expected FETCH_RESPONSE, got %T", fresp)
-		}
-		result.Chunks = append(result.Chunks, fr.Results...)
-		more = fr.HasBatchIndex
+	return &c.buffered[0]
+}
+
+// nextChunk returns the next available chunk, fetching one server batch
+// from the server when the local buffer is empty and more chunks are
+// available. Returns (nil, nil) when the result set is exhausted.
+func (c *cursor) nextChunk(ctx context.Context) (*message.DataChunk, error) {
+	if c.closed {
+		return nil, nil
 	}
-	return result, nil
+	if len(c.buffered) == 0 && c.needsMore {
+		if err := c.fetchMore(ctx); err != nil {
+			return nil, err
+		}
+	}
+	if len(c.buffered) == 0 {
+		return nil, nil
+	}
+	chunk := c.buffered[0]
+	c.buffered = c.buffered[1:]
+	return &chunk, nil
+}
+
+// drainAll consumes every remaining chunk and returns them in order.
+// Used by ExecuteUpdate, metadata queries, and any other call site
+// whose result is small enough to materialize.
+func (c *cursor) drainAll(ctx context.Context) ([]message.DataChunk, error) {
+	out := append([]message.DataChunk(nil), c.buffered...)
+	c.buffered = nil
+	for c.needsMore {
+		if err := c.fetchMore(ctx); err != nil {
+			return nil, err
+		}
+		out = append(out, c.buffered...)
+		c.buffered = nil
+	}
+	return out, nil
+}
+
+func (c *cursor) fetchMore(ctx context.Context) error {
+	freq := message.FetchRequest{
+		Hdr: message.MessageHeader{
+			Type:          message.MessageTypeFetchRequest,
+			ConnectionID:  c.sess.connectionID,
+			ClientQueryID: c.sess.nextQueryID(),
+		},
+		ResultUUID: c.resultUUID,
+	}
+	resp, err := c.sess.transport.Send(ctx, freq)
+	if err != nil {
+		return fmt.Errorf("cursor: fetch: %w", err)
+	}
+	fr, ok := resp.(message.FetchResponse)
+	if !ok {
+		return fmt.Errorf("cursor: expected FETCH_RESPONSE, got %T", resp)
+	}
+	c.buffered = append(c.buffered, fr.Results...)
+	c.needsMore = fr.HasBatchIndex
+	return nil
+}
+
+func (c *cursor) close() {
+	c.closed = true
+	c.buffered = nil
+	// Quack has no explicit "release result" message today; the server
+	// releases on DISCONNECT or after the batch_index sentinel. Closing
+	// the cursor locally is sufficient.
+}
+
+// drainPrepared is a convenience wrapper that runs a SQL statement and
+// returns every chunk eagerly. Used by metadata queries and for the
+// side-effect-only BEGIN/COMMIT/ROLLBACK SQL that has no real result.
+type drainedResult struct {
+	ColumnNames []string
+	ColumnTypes []quacktype.LogicalType
+	Chunks      []message.DataChunk
+}
+
+func (s *session) drainPrepared(ctx context.Context, sql string) (*drainedResult, error) {
+	cur, err := s.cursor(ctx, sql)
+	if err != nil {
+		return nil, err
+	}
+	defer cur.close()
+	chunks, err := cur.drainAll(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &drainedResult{
+		ColumnNames: cur.columnNamesSlice(),
+		ColumnTypes: cur.columnTypesSlice(),
+		Chunks:      chunks,
+	}, nil
 }
 
 // appendChunk POSTs an APPEND_REQUEST for bulk-load.
@@ -152,11 +254,4 @@ func (s *session) close(ctx context.Context) error {
 
 func (s *session) nextQueryID() uint64 {
 	return s.queryIDSeq.Add(1) - 1
-}
-
-// PreparedResult is the eager-materialized result of one PREPARE_REQUEST.
-type PreparedResult struct {
-	ColumnNames []string
-	ColumnTypes []quacktype.LogicalType
-	Chunks      []message.DataChunk
 }

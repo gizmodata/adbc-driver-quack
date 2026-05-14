@@ -61,6 +61,16 @@ jobs:
       - name: Run Python tests
         run: cd python && pytest -v -m integration
 
+      - name: Upload c-shared driver library
+        # Only upload once per OS — every python version produces the
+        # same binary so we keep the 3.12 build to avoid duplicates.
+        if: matrix.python == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: libadbc_driver_quack-${{ runner.os }}
+          path: pkg/quack/libadbc_driver_quack.*
+          if-no-files-found: error
+
       - name: Upload test logs on failure
         if: failure()
         uses: actions/upload-artifact@v4

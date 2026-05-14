@@ -51,7 +51,7 @@ func (c *connectionImpl) getTableSchemaImpl(ctx context.Context, catalog, dbSche
 	}
 	q += " ORDER BY column_index"
 
-	result, err := c.sess.prepare(ctx, q)
+	result, err := c.sess.drainPrepared(ctx, q)
 	if err != nil {
 		return nil, fromTransportError(err)
 	}
@@ -62,7 +62,10 @@ func (c *connectionImpl) getTableSchemaImpl(ctx context.Context, catalog, dbSche
 	for _, chunk := range result.Chunks {
 		nameVec := chunk.Columns[0]
 		typeVec := chunk.Columns[1]
-		var nullableVec interface{ IsNull(int) bool; GetObject(int) interface{} } = chunk.Columns[2]
+		var nullableVec interface {
+			IsNull(int) bool
+			GetObject(int) interface{}
+		} = chunk.Columns[2]
 		for i := 0; i < chunk.RowCount; i++ {
 			colName, _ := nameVec.GetObject(i).(string)
 			dataType, _ := typeVec.GetObject(i).(string)

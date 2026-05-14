@@ -168,7 +168,7 @@ FROM duckdb_columns() WHERE database_name = `)
 	appendLikeQual(&sb, "column_name", columnFilter)
 	sb.WriteString(" ORDER BY column_index")
 
-	result, err := c.sess.prepare(ctx, sb.String())
+	result, err := c.sess.drainPrepared(ctx, sb.String())
 	if err != nil {
 		return nil, fromTransportError(err)
 	}
@@ -225,7 +225,7 @@ type tableNameRow struct {
 }
 
 func (c *connectionImpl) queryStringColumn(ctx context.Context, sql string) ([]string, error) {
-	result, err := c.sess.prepare(ctx, sql)
+	result, err := c.sess.drainPrepared(ctx, sql)
 	if err != nil {
 		return nil, fromTransportError(err)
 	}
@@ -242,7 +242,7 @@ func (c *connectionImpl) queryStringColumn(ctx context.Context, sql string) ([]s
 }
 
 func (c *connectionImpl) queryTableNames(ctx context.Context, sql string) ([]tableNameRow, error) {
-	result, err := c.sess.prepare(ctx, sql)
+	result, err := c.sess.drainPrepared(ctx, sql)
 	if err != nil {
 		return nil, fromTransportError(err)
 	}

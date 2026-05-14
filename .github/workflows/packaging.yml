@@ -74,6 +74,24 @@ jobs:
           name: wheel-${{ matrix.os }}-${{ matrix.arch }}
           path: python/dist/*.whl
 
+      - name: Stage c-shared library + checksum for release
+        shell: bash
+        run: |
+          mkdir -p release-artifacts
+          base="libadbc_driver_quack-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.ext }}"
+          cp "pkg/quack/libadbc_driver_quack.${{ matrix.ext }}" "release-artifacts/${base}"
+          if command -v sha256sum > /dev/null 2>&1; then
+            (cd release-artifacts && sha256sum "${base}" > "${base}.sha256")
+          else
+            (cd release-artifacts && shasum -a 256 "${base}" > "${base}.sha256")
+          fi
+
+      - name: Upload c-shared library artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libadbc_driver_quack-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: release-artifacts/*
+
   publish:
     name: Publish to PyPI
     needs: wheels
@@ -87,11 +105,50 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          path: dist
-          merge-multiple: true
+          path: artifacts
+
+      - name: Stage wheels for PyPI
+        run: |
+          mkdir -p dist
+          # Wheels live under artifacts/wheel-<os>-<arch>/*.whl
+          find artifacts -type d -name 'wheel-*' -exec cp -r {}/. dist/ \;
+          ls -la dist/
 
       - name: Publish to PyPI via OIDC trusted publishing
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
           skip-existing: true
+
+  github-release:
+    name: Attach c-shared libraries to GitHub Release
+    needs: wheels
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Stage c-shared library bundle
+        run: |
+          mkdir -p release-bundle
+          find artifacts -type d -name 'libadbc_driver_quack-*' -exec cp -r {}/. release-bundle/ \;
+          # One combined checksum manifest across every platform.
+          (cd release-bundle && find . -type f -name 'libadbc_driver_quack-*' \
+             ! -name '*.sha256' -exec sha256sum {} \; > SHA256SUMS) \
+             || (cd release-bundle && find . -type f -name 'libadbc_driver_quack-*' \
+                  ! -name '*.sha256' -exec shasum -a 256 {} \; > SHA256SUMS)
+          ls -la release-bundle/
+
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-bundle/libadbc_driver_quack-*
+            release-bundle/SHA256SUMS
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref, '-alpha') || contains(github.ref, '-beta') || contains(github.ref, '-rc') }}

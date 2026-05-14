@@ -49,7 +49,7 @@ WHERE database_name = `)
 	q.WriteString(" AND schema_name = " + sqlString(schema))
 	q.WriteString(" ORDER BY table_name, constraint_name, column_index")
 
-	result, err := c.sess.prepare(ctx, q.String())
+	result, err := c.sess.drainPrepared(ctx, q.String())
 	if err != nil {
 		return fromTransportError(err)
 	}
@@ -123,7 +123,7 @@ WHERE database_name = `)
 	q.WriteString(" AND schema_name = " + sqlString(schema))
 	q.WriteString(" ORDER BY table_name, constraint_name, column_index")
 
-	result, err := c.sess.prepare(ctx, q.String())
+	result, err := c.sess.drainPrepared(ctx, q.String())
 	if err != nil {
 		// If the column unnesting fails (older duckdb_constraints schema)
 		// just no-op — primary keys still come through.

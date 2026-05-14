@@ -11,22 +11,26 @@ import (
 	"github.com/gizmodata/adbc-driver-quack/internal/message"
 )
 
-// driverInfoValues collects the static (name/version) info codes we can
-// fill in without a server round-trip.
+// driverInfoValues collects the static string info codes we can fill in
+// without a server round-trip.
 var driverInfoValues = map[adbc.InfoCode]string{
-	adbc.InfoVendorName:        "DuckDB (via Quack)",
-	adbc.InfoDriverName:        "ADBC Quack Driver - Go",
-	adbc.InfoDriverVersion:     "0.0.0", // updated below from build info if available
+	adbc.InfoVendorName:         "DuckDB (via Quack)",
+	adbc.InfoDriverName:         "ADBC Quack Driver - Go",
+	adbc.InfoDriverVersion:      "0.0.0", // updated below from build info if available
 	adbc.InfoDriverArrowVersion: "arrow-go/v18",
 }
 
 // supportedInfoCodes is the default set we emit when the caller passes no codes.
+// Covers what DBeaver, Polars, and ibis ask for during connection probe.
 var supportedInfoCodes = []adbc.InfoCode{
 	adbc.InfoVendorName,
 	adbc.InfoVendorVersion,
+	adbc.InfoVendorSql,
+	adbc.InfoVendorSubstrait,
 	adbc.InfoDriverName,
 	adbc.InfoDriverVersion,
 	adbc.InfoDriverArrowVersion,
+	adbc.InfoDriverADBCVersion,
 }
 
 // getInfoImpl assembles the GetInfo standard record. Values that need a
@@ -75,12 +79,20 @@ func (c *connectionImpl) getInfoImpl(ctx context.Context, infoCodes []adbc.InfoC
 			stringValue, kind, present = driverInfoValues[code], adbc.InfoValueStringType, true
 		case adbc.InfoVendorVersion:
 			stringValue, kind, present = vendorVersion, adbc.InfoValueStringType, true
+		case adbc.InfoVendorSql:
+			// Quack speaks SQL — the whole protocol is "send a SQL string,
+			// get DataChunks back". Substrait is unsupported on both sides.
+			boolValue, kind, present = true, adbc.InfoValueBooleanType, true
+		case adbc.InfoVendorSubstrait:
+			boolValue, kind, present = false, adbc.InfoValueBooleanType, true
 		case adbc.InfoDriverName:
 			stringValue, kind, present = driverInfoValues[code], adbc.InfoValueStringType, true
 		case adbc.InfoDriverVersion:
 			stringValue, kind, present = driverVersion, adbc.InfoValueStringType, true
 		case adbc.InfoDriverArrowVersion:
 			stringValue, kind, present = driverInfoValues[code], adbc.InfoValueStringType, true
+		case adbc.InfoDriverADBCVersion:
+			intValue, kind, present = adbc.AdbcVersion1_1_0, adbc.InfoValueInt64Type, true
 		default:
 			kind = adbc.InfoValueStringType
 			present = false
@@ -117,7 +129,7 @@ func (c *connectionImpl) getInfoImpl(ctx context.Context, infoCodes []adbc.InfoC
 // fetchVendorVersion runs PRAGMA version and returns the version string.
 // Returns "" on any error — InfoVendorVersion will then be null.
 func (c *connectionImpl) fetchVendorVersion(ctx context.Context) string {
-	result, err := c.sess.prepare(ctx, "PRAGMA version")
+	result, err := c.sess.drainPrepared(ctx, "PRAGMA version")
 	if err != nil || len(result.Chunks) == 0 {
 		return ""
 	}

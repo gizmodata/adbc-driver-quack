@@ -6,6 +6,89 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.1] — 2026-05-14
+
+First publishable release. Wheels + sdist on PyPI, Go module tag
+`v0.1.0-alpha.1`, c-shared libraries (linux x86_64, macOS x86_64 +
+arm64, windows x86_64) attached to the GitHub Release with
+`SHA256SUMS`. Cuts the line between "internal scaffolding" and
+"users can `pip install adbc-driver-quack`."
+
+### Added — Streaming `ExecuteQuery` (`#1`)
+
+- `session.cursor()` returns a streaming `*cursor`. Only the chunks
+  delivered with the initial `PREPARE_RESPONSE` are eagerly buffered;
+  subsequent chunks are pulled via `FETCH_REQUEST` on demand as the
+  caller iterates the `RecordReader`.
+- New `record_reader.go` implements `array.RecordReader` over the
+  cursor — one `Next()` call drives at most one Quack `FETCH_REQUEST`.
+- `Statement.ExecuteQuery` now returns this streaming reader instead of
+  draining every chunk up front. Memory for a million-row result is
+  bounded by one DuckDB DataChunk (~2k rows).
+- ADBC driver-manager wraps the Go `RecordReader` as an
+  `ArrowArrayStream` (C Data Interface), preserving streaming all the
+  way through to pyarrow's `RecordBatchReader` — the Python side
+  pulls one batch per server fetch.
+- `Statement.ExecuteUpdate` and every metadata query continue to use
+  the new `session.drainPrepared` convenience (eager drain) because
+  their results are tiny.
+- Python integration test
+  `test_streaming_large_result_set` walks a 100k-row `range()` query
+  and asserts the reader yields multiple batches (not one giant
+  materialized record) — would fail loudly if streaming regressed.
+
+### Added — `HUGEINT` / `UHUGEINT` → arrow `Decimal128(38, 0)` (`#2`)
+
+- Replaced the placeholder "string-format the int128" path with an
+  exact `Decimal128(38, 0)` mapping. Precision 38 holds any signed
+  int128 losslessly (max int128 ≈ 1.7×10³⁸ < 10³⁸).
+- `Decimal128Builder` case in `buildColumn` now accepts both
+  `*big.Rat` (DuckDB `DECIMAL`) and `*big.Int` (HUGEINT / UHUGEINT).
+- `SUM(INTEGER)`, `COUNT_STAR()`, and every other DuckDB function that
+  returns HUGEINT now flow through as native decimal columns instead
+  of strings — `int(row["s"])` in the existing
+  `test_bulk_ingest` works without the `CAST(... AS BIGINT)` workaround.
+- Documented UHUGEINT precision caveat: values above 10³⁸-1 (uint128's
+  39th decimal digit) lose precision; users wanting full unsigned
+  range should `CAST(... AS DECIMAL(39, 0))` in SQL (uses Decimal256
+  on the server). DBeaver / Polars / ibis don't hit this in practice.
+
+### Added — Expanded `GetInfo` codes (`#9`)
+
+- `InfoVendorSql` reports `true` (Quack speaks SQL end-to-end).
+- `InfoVendorSubstrait` reports `false`.
+- `InfoDriverADBCVersion` reports `AdbcVersion1_1_0` (1_001_000) — the
+  framework version Go driver-base targets, so driver-manager and
+  other ADBC consumers can choose the right call surface.
+- Default info-code set now covers all eight codes, so a no-argument
+  `Connection.GetInfo()` returns the full driver/vendor probe in one
+  call.
+
+### Added — Connection pool friendliness (`#13`)
+
+- Python integration test
+  `test_connection_pool_friendliness` exercises 50 sequential
+  open/close cycles (catching connection-id, socket, or server-side
+  state leaks) and then 16 concurrent connections in a thread pool
+  (catching races in the session/connection-id allocator).
+- No driver code changes were needed — the session already issues
+  `DISCONNECT` on `Connection.Close()` and the connection-id sequence
+  is atomic — but the test locks in the contract.
+
+### Added — CI artifact uploads + GitHub Release bundle
+
+- `python.yml` now uploads `libadbc_driver_quack.{so,dylib,dll}` for
+  every PR/main run (one upload per OS, keyed off the 3.12 job).
+  Anyone reviewing a PR can grab the c-shared lib without running
+  `make -C pkg/quack` locally.
+- `packaging.yml` (tag triggered) builds the c-shared lib for every
+  release target (linux-amd64, darwin-amd64, darwin-arm64,
+  windows-amd64), checksums each binary, and attaches them — plus a
+  combined `SHA256SUMS` — to the GitHub Release. The PyPI publish
+  step is unchanged.
+- Pre-release detection now flags `-alpha` / `-beta` / `-rc` tags as
+  GitHub pre-releases automatically.
+
 ### Added — Real `Commit` / `Rollback` (autocommit-off transactions)
 
 - `Connection.SetOption("adbc.connection.autocommit", "false")` now

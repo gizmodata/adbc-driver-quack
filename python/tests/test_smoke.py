@@ -50,10 +50,13 @@ def test_bulk_ingest(quack_server):
         })
         cur.adbc_ingest("adbc_it_ingest", table, mode="append")
 
-        # SUM(INTEGER) in DuckDB returns HUGEINT, which surfaces as a string
-        # via the driver (no native arrow Int128). Cast as a sanity check.
-        cur.execute("SELECT COUNT(*) AS n, CAST(SUM(id) AS BIGINT) AS s FROM adbc_it_ingest")
-        row = cur.fetch_arrow_table().to_pylist()[0]
+        # SUM(INTEGER) in DuckDB returns HUGEINT. The driver maps HUGEINT
+        # to arrow Decimal128(38, 0), so the result is a decimal.Decimal.
+        cur.execute("SELECT COUNT(*) AS n, SUM(id) AS s FROM adbc_it_ingest")
+        table = cur.fetch_arrow_table()
+        assert pa.types.is_decimal128(table.schema.field("s").type), \
+            f"SUM(INTEGER) should map to Decimal128, got {table.schema.field('s').type}"
+        row = table.to_pylist()[0]
         assert row["n"] == 3
         assert int(row["s"]) == 60
         cur.execute("DROP TABLE adbc_it_ingest")
@@ -218,6 +221,54 @@ def test_transaction_commit_and_rollback(quack_server):
         ids = [r["id"] for r in cur.fetch_arrow_table().to_pylist()]
         assert ids == [1, 3], f"expected [1, 3] (2 should have rolled back), got {ids}"
         cur.execute("DROP TABLE adbc_it_tx")
+
+
+def test_streaming_large_result_set(quack_server):
+    """ExecuteQuery streams chunks lazily — verify a >server-batch result reads
+    cleanly without OOM-ing or short-circuiting the row count."""
+    with _connect(quack_server) as conn, conn.cursor() as cur:
+        # range(0, 100_000) is comfortably larger than DuckDB's standard 2048
+        # row batch (~48 server chunks) — exercising fetchMore at least once.
+        cur.execute("SELECT i AS n FROM range(0, 100000) t(i)")
+        reader = cur.fetch_record_batch()
+        total = 0
+        batch_count = 0
+        for batch in reader:
+            total += batch.num_rows
+            batch_count += 1
+        assert total == 100_000, f"expected 100k rows, got {total}"
+        # Sanity: the result *did* come back as multiple batches, not one
+        # giant materialized blob.
+        assert batch_count > 1, (
+            f"expected multiple streamed batches, got {batch_count} — "
+            "streaming may have regressed"
+        )
+
+
+def test_connection_pool_friendliness(quack_server):
+    """Rapid open/close cycles + concurrent connections against one server."""
+    import concurrent.futures
+
+    # 50 sequential open/close cycles — each one runs handshake +
+    # DISCONNECT. If we leak fds, sockets, or server-side connection ids,
+    # the back end will start refusing well before 50 iterations.
+    for _ in range(50):
+        with _connect(quack_server) as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1 AS x")
+            row = cur.fetch_arrow_table().to_pylist()[0]
+            assert row["x"] == 1
+
+    # 16 concurrent connections each doing a small SELECT. This exposes
+    # any race in the session/connection-id allocator and ensures the
+    # server-side handler tolerates parallel handshakes.
+    def _worker(i):
+        with _connect(quack_server) as conn, conn.cursor() as cur:
+            cur.execute(f"SELECT {i} AS x")
+            return cur.fetch_arrow_table().to_pylist()[0]["x"]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as ex:
+        results = list(ex.map(_worker, range(16)))
+    assert sorted(results) == list(range(16)), f"lost results: {results}"
 
 
 def test_bad_token_rejected(quack_server):
