@@ -18,10 +18,71 @@ Distributed as:
 - a Go module — `github.com/gizmodata/adbc-driver-quack`
 - a `pip install adbc-driver-quack` wheel for Python (macOS / Linux / Windows × x64 / arm64)
 
-> **Status:** Scaffolding — under active development. The companion
+> **Status:** Alpha — `v0.1.0-alpha.1` is the first release. The companion
 > [`gizmodata/quack-jdbc`](https://github.com/gizmodata/quack-jdbc) JDBC
-> driver is the same protocol from the JVM; that one is at
+> driver is the same protocol from the JVM and is at
 > [v0.1.0-alpha.1 on Maven Central](https://central.sonatype.com/artifact/com.gizmodata/quack-jdbc/0.1.0-alpha.1).
+
+## Quickstart (Python)
+
+```bash
+pip install adbc-driver-quack
+```
+
+```python
+import adbc_driver_quack.dbapi
+import pyarrow
+
+with adbc_driver_quack.dbapi.connect(
+    "quack://127.0.0.1:9494",
+    db_kwargs={"adbc.quack.token": "my-token"},
+) as conn, conn.cursor() as cur:
+    cur.execute("SELECT 42 AS answer, 'hello' AS greeting")
+    table: pyarrow.Table = cur.fetch_arrow_table()
+    print(table)
+```
+
+The result is a real `pyarrow.Table` — pass it straight to Polars, Pandas,
+DuckDB-in-process, ibis, or anything else that consumes Arrow:
+
+```python
+import polars as pl
+df = pl.from_arrow(table)
+```
+
+### Streaming large result sets
+
+`Cursor.fetch_record_batch()` returns a `pyarrow.RecordBatchReader` that
+pulls one server-side `DataChunk` per `read_next_batch()` call. Memory
+stays bounded by the server's chunk size (~2k rows) even when the result
+is millions of rows:
+
+```python
+with conn.cursor() as cur:
+    cur.execute("SELECT * FROM lineitem")  # arbitrary size
+    reader = cur.fetch_record_batch()
+    for batch in reader:
+        process(batch)  # one ~2k-row Arrow batch at a time
+```
+
+### Bulk ingest (Arrow → DuckDB)
+
+```python
+import pyarrow as pa
+
+table = pa.table({"id": [1, 2, 3], "name": ["alice", "bob", "carol"]})
+with adbc_driver_quack.dbapi.connect(...) as conn, conn.cursor() as cur:
+    cur.adbc_ingest("customers", table, mode="append")  # one APPEND_REQUEST per RecordBatch
+```
+
+### Transactions (autocommit off)
+
+```python
+with adbc_driver_quack.dbapi.connect(..., autocommit=False) as conn, conn.cursor() as cur:
+    cur.execute("INSERT INTO orders VALUES (1, 'pending')")
+    cur.execute("INSERT INTO order_items VALUES (1, 'widget', 2)")
+    conn.commit()  # both inserts persist atomically
+```
 
 ## Why ADBC and not JDBC?
 
@@ -33,33 +94,6 @@ one that fits your runtime:
 | A JVM tool (DBeaver, IntelliJ, Spark, dbt-jdbc, plain `java.sql`) | [`quack-jdbc`](https://github.com/gizmodata/quack-jdbc) |
 | Python (`pip install`), Go, Rust, R, anything via ADBC C ABI | this driver |
 | You want **zero-copy Arrow data** end-to-end | this driver |
-
-## Planned quickstart (after first release)
-
-```python
-import adbc_driver_quack.dbapi
-import pyarrow
-
-conn = adbc_driver_quack.dbapi.connect(
-    "quack://127.0.0.1:9494",
-    db_kwargs={"adbc.quack.token": "my-token"},
-)
-with conn.cursor() as cur:
-    cur.execute("SELECT 42 AS answer")
-    table: pyarrow.Table = cur.fetch_arrow_table()
-    print(table)
-```
-
-Bulk ingest:
-
-```python
-import pyarrow as pa
-import adbc_driver_quack.dbapi
-
-table = pa.table({"id": [1, 2, 3], "name": ["alice", "bob", "carol"]})
-with adbc_driver_quack.dbapi.connect(...) as conn, conn.cursor() as cur:
-    cur.adbc_ingest("customers", table, mode="append")  # one APPEND_REQUEST per RecordBatch
-```
 
 ## Repo layout
 

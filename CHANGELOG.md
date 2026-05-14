@@ -14,6 +14,74 @@ arm64, windows x86_64) attached to the GitHub Release with
 `SHA256SUMS`. Cuts the line between "internal scaffolding" and
 "users can `pip install adbc-driver-quack`."
 
+### Added — Nested types (LIST / STRUCT / ARRAY / MAP)
+
+- `LogicalTypeIDList` → `arrow.List<T>`, `LogicalTypeIDArray` →
+  `arrow.FixedSizeList<T, N>`, `LogicalTypeIDStruct` →
+  `arrow.Struct<fields...>`, `LogicalTypeIDMap` →
+  `arrow.Map<K, V>` (encoded as `LIST<STRUCT<key, value>>` on the wire,
+  as DuckDB does internally).
+- New `appendBoxedScalar` / `appendBoxedSlice` helpers in
+  `arrow_conv.go` dispatch a single `interface{}` value into the right
+  builder, recursing through nested types (`LIST<LIST<INTEGER>>`,
+  `STRUCT<a: LIST<INTEGER>>`, etc.).
+- The wire decoder already produced `[]interface{}` for list-likes and
+  `map[string]interface{}` for structs, so no codec changes were
+  needed — the gap was purely on the arrow conversion side.
+- Python integration test
+  `test_nested_types_round_trip` exercises all four nested-type
+  surfaces in one query:
+  `SELECT [1,2,3]::INTEGER[3], [10,20]::INTEGER[], {'a':1, 'b':'hello'}, MAP {'x':1, 'y':2}`
+  and asserts each column comes back with the correct
+  `pyarrow.types.is_*` check + value round-trip.
+
+### Added — ADBC validation conformance suite scaffolding
+
+- New `validation_test.go` plugs the driver into
+  `apache/arrow-adbc/go/adbc/validation`'s generic conformance suite
+  (DatabaseTests, ConnectionTests, StatementTests).
+- `QuackQuirks` declares: bulk-ingest=append-only, concurrent
+  statements, transactions, GetSetOptions, error-on-incompatible-
+  ingest-schema. Disables: dynamic parameter binding (Quack 1.0 has
+  no `PARAMETER_BIND` message — see Skipped below), partitioned data,
+  statistics, execute-schema, current-catalog/schema, GetParameterSchema.
+- Suite is **opt-in**: skipped unless `QUACK_VALIDATION_URI` env var
+  points at a running Quack server. Hermetic for normal CI; available
+  to developers verifying conformance against a real server.
+
+### Skipped — Parameter binding (Quack 1.0 protocol limitation)
+
+- Quack 1.0's message catalog (ConnectionRequest, PrepareRequest,
+  FetchRequest, AppendRequest, …) has no `PARAMETER_BIND` /
+  `BIND_REQUEST` message. Slots 5 and 6 are reserved, suggesting
+  future expansion.
+- Driver continues to inline parameters client-side (the same approach
+  the JDBC sibling takes). Dynamic binding will land when the upstream
+  protocol gains it.
+
+### Added — Windows wheel CI (best-effort)
+
+- `windows-latest` added to `python.yml`'s test matrix. Marked
+  `continue-on-error: true` while the CGO + DuckDB-via-subprocess
+  fixture story is hardened on Windows runners.
+- Defaulted the shell to `bash` so the build steps run unchanged;
+  DuckDB CLI install on Windows uses `Invoke-WebRequest` to fetch the
+  official zip.
+
+### Expanded — Python test matrix (3.10 → 3.14)
+
+- Test matrix expanded from `[3.10, 3.11, 3.12]` to
+  `[3.10, 3.11, 3.12, 3.13, 3.14]` so we don't drift behind the
+  Python release cadence. `pyproject.toml` classifiers updated to
+  match.
+
+### Added — Quickstart in README
+
+- Top-of-README quickstart with `pip install`, a 3-line connect +
+  fetch snippet, a streaming-large-result example, a bulk-ingest
+  example, and an explicit transactions example. Replaces the
+  placeholder "Planned quickstart" section.
+
 ### Added — Streaming `ExecuteQuery` (`#1`)
 
 - `session.cursor()` returns a streaming `*cursor`. Only the chunks

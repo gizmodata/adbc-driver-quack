@@ -76,9 +76,52 @@ func arrowType(t quacktype.LogicalType) arrow.DataType {
 		return &arrow.Decimal128Type{Precision: 38, Scale: 0}
 	case quacktype.LogicalTypeIDInterval:
 		return arrow.FixedWidthTypes.MonthDayNanoInterval
+	case quacktype.LogicalTypeIDList:
+		child, err := quacktype.GetChildType(t)
+		if err != nil {
+			return arrow.BinaryTypes.String
+		}
+		return arrow.ListOf(arrowType(child))
+	case quacktype.LogicalTypeIDArray:
+		child, err := quacktype.GetChildType(t)
+		if err != nil {
+			return arrow.BinaryTypes.String
+		}
+		size, err := quacktype.GetArraySize(t)
+		if err != nil || size <= 0 {
+			// Fall back to a regular list if size is unset — DuckDB only
+			// uses ARRAY when size > 0.
+			return arrow.ListOf(arrowType(child))
+		}
+		return arrow.FixedSizeListOf(int32(size), arrowType(child))
+	case quacktype.LogicalTypeIDStruct:
+		children, err := quacktype.GetStructChildren(t)
+		if err != nil || len(children) == 0 {
+			return arrow.BinaryTypes.String
+		}
+		fields := make([]arrow.Field, len(children))
+		for i, c := range children {
+			fields[i] = arrow.Field{
+				Name:     c.Name,
+				Type:     arrowType(c.Type),
+				Nullable: true,
+			}
+		}
+		return arrow.StructOf(fields...)
+	case quacktype.LogicalTypeIDMap:
+		// DuckDB MAP is encoded as LIST<STRUCT<key, value>>. ListTypeInfo
+		// carries the element type — which for MAP is a struct of (key, value).
+		child, err := quacktype.GetChildType(t)
+		if err != nil {
+			return arrow.BinaryTypes.String
+		}
+		if structChildren, err := quacktype.GetStructChildren(child); err == nil && len(structChildren) == 2 {
+			return arrow.MapOf(arrowType(structChildren[0].Type), arrowType(structChildren[1].Type))
+		}
+		// If the wire didn't carry a key/value pair, fall back to list of
+		// stringified structs so the column still surfaces.
+		return arrow.ListOf(arrowType(child))
 	}
-	// Fallback for anything else (STRUCT/LIST/ARRAY/MAP nested types — not
-	// yet implemented in the converter).
 	return arrow.BinaryTypes.String
 }
 
@@ -296,6 +339,102 @@ func buildColumn(b array.Builder, t quacktype.LogicalType, vec message.DecodedVe
 				builder.AppendNull()
 			}
 		}
+	case *array.ListBuilder:
+		// LIST<T>: decoder returns each row as []interface{} of child values.
+		valueBuilder := builder.ValueBuilder()
+		childType, _ := quacktype.GetChildType(t)
+		for i := 0; i < n; i++ {
+			if vec.IsNull(i) {
+				builder.AppendNull()
+				continue
+			}
+			items, ok := vec.GetObject(i).([]interface{})
+			if !ok {
+				builder.AppendNull()
+				continue
+			}
+			builder.Append(true)
+			if err := appendBoxedSlice(valueBuilder, childType, items); err != nil {
+				return err
+			}
+		}
+	case *array.FixedSizeListBuilder:
+		// ARRAY<T>[N]: same row shape as LIST, but each entry must be exactly N items.
+		valueBuilder := builder.ValueBuilder()
+		childType, _ := quacktype.GetChildType(t)
+		for i := 0; i < n; i++ {
+			if vec.IsNull(i) {
+				builder.AppendNull()
+				continue
+			}
+			items, ok := vec.GetObject(i).([]interface{})
+			if !ok {
+				builder.AppendNull()
+				continue
+			}
+			builder.Append(true)
+			if err := appendBoxedSlice(valueBuilder, childType, items); err != nil {
+				return err
+			}
+		}
+	case *array.StructBuilder:
+		// STRUCT: decoder returns each row as map[string]interface{}.
+		children, _ := quacktype.GetStructChildren(t)
+		for i := 0; i < n; i++ {
+			if vec.IsNull(i) {
+				builder.AppendNull()
+				continue
+			}
+			row, ok := vec.GetObject(i).(map[string]interface{})
+			if !ok {
+				builder.AppendNull()
+				continue
+			}
+			builder.Append(true)
+			for ci, child := range children {
+				val, present := row[child.Name]
+				if err := appendBoxedScalar(builder.FieldBuilder(ci), child.Type, val, !present || val == nil); err != nil {
+					return err
+				}
+			}
+		}
+	case *array.MapBuilder:
+		// MAP: decoder encodes as LIST<STRUCT<key, value>> — each row is
+		// []interface{} of map[string]interface{} entries.
+		keyBuilder := builder.KeyBuilder()
+		itemBuilder := builder.ItemBuilder()
+		var keyType, valueType quacktype.LogicalType
+		if childList, err := quacktype.GetChildType(t); err == nil {
+			if kvChildren, err := quacktype.GetStructChildren(childList); err == nil && len(kvChildren) == 2 {
+				keyType, valueType = kvChildren[0].Type, kvChildren[1].Type
+			}
+		}
+		for i := 0; i < n; i++ {
+			if vec.IsNull(i) {
+				builder.AppendNull()
+				continue
+			}
+			entries, ok := vec.GetObject(i).([]interface{})
+			if !ok {
+				builder.AppendNull()
+				continue
+			}
+			builder.Append(true)
+			for _, e := range entries {
+				kv, ok := e.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				k, kPresent := kv["key"]
+				v, vPresent := kv["value"]
+				if err := appendBoxedScalar(keyBuilder, keyType, k, !kPresent || k == nil); err != nil {
+					return err
+				}
+				if err := appendBoxedScalar(itemBuilder, valueType, v, !vPresent || v == nil); err != nil {
+					return err
+				}
+			}
+		}
 	default:
 		// Fallback — try string-format the value.
 		if sb, ok := b.(*array.StringBuilder); ok {
@@ -309,6 +448,122 @@ func buildColumn(b array.Builder, t quacktype.LogicalType, vec message.DecodedVe
 			return nil
 		}
 		return fmt.Errorf("arrowconv: builder %T not yet handled (type %s)", b, t.ID)
+	}
+	return nil
+}
+
+// appendBoxedSlice appends each element of items into valueBuilder by
+// dispatching on the arrow builder's concrete type. Used by ListBuilder
+// and FixedSizeListBuilder paths where each row is a []interface{}.
+func appendBoxedSlice(b array.Builder, childType quacktype.LogicalType, items []interface{}) error {
+	for _, v := range items {
+		if err := appendBoxedScalar(b, childType, v, v == nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// appendBoxedScalar appends a single interface{} value into builder b,
+// respecting the declared childType. The caller passes isNull=true to
+// force a null (e.g. when the source map didn't contain the field).
+func appendBoxedScalar(b array.Builder, childType quacktype.LogicalType, v interface{}, isNull bool) error {
+	if isNull {
+		b.AppendNull()
+		return nil
+	}
+	switch bb := b.(type) {
+	case *array.BooleanBuilder:
+		if x, ok := v.(bool); ok {
+			bb.Append(x)
+		} else {
+			bb.AppendNull()
+		}
+	case *array.Int8Builder:
+		bb.Append(toInt8(v))
+	case *array.Int16Builder:
+		bb.Append(toInt16(v))
+	case *array.Int32Builder:
+		bb.Append(toInt32(v))
+	case *array.Int64Builder:
+		bb.Append(toInt64(v))
+	case *array.Uint8Builder:
+		bb.Append(uint8(toInt64(v)))
+	case *array.Uint16Builder:
+		bb.Append(uint16(toInt64(v)))
+	case *array.Uint32Builder:
+		bb.Append(uint32(toInt64(v)))
+	case *array.Uint64Builder:
+		bb.Append(uint64(toInt64(v)))
+	case *array.Float32Builder:
+		bb.Append(float32(toFloat64(v)))
+	case *array.Float64Builder:
+		bb.Append(toFloat64(v))
+	case *array.StringBuilder:
+		if s, ok := v.(string); ok {
+			bb.Append(s)
+		} else if b2, ok := v.([]byte); ok {
+			bb.Append(string(b2))
+		} else {
+			bb.Append(fmt.Sprintf("%v", v))
+		}
+	case *array.BinaryBuilder:
+		if b2, ok := v.([]byte); ok {
+			bb.Append(b2)
+		} else if s, ok := v.(string); ok {
+			bb.Append([]byte(s))
+		} else {
+			bb.AppendNull()
+		}
+	case *array.Decimal128Builder:
+		switch x := v.(type) {
+		case *big.Int:
+			bb.Append(decimal128.FromBigInt(x))
+		case *big.Rat:
+			dt, _ := bb.Type().(*arrow.Decimal128Type)
+			scaleFactor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(dt.Scale)), nil)
+			num := new(big.Int).Mul(x.Num(), scaleFactor)
+			unscaled := new(big.Int).Quo(num, x.Denom())
+			bb.Append(decimal128.FromBigInt(unscaled))
+		default:
+			bb.AppendNull()
+		}
+	case *array.ListBuilder:
+		// Nested LIST inside LIST/STRUCT — recurse.
+		if items, ok := v.([]interface{}); ok {
+			bb.Append(true)
+			inner, _ := quacktype.GetChildType(childType)
+			return appendBoxedSlice(bb.ValueBuilder(), inner, items)
+		}
+		bb.AppendNull()
+	case *array.FixedSizeListBuilder:
+		if items, ok := v.([]interface{}); ok {
+			bb.Append(true)
+			inner, _ := quacktype.GetChildType(childType)
+			return appendBoxedSlice(bb.ValueBuilder(), inner, items)
+		}
+		bb.AppendNull()
+	case *array.StructBuilder:
+		row, ok := v.(map[string]interface{})
+		if !ok {
+			bb.AppendNull()
+			return nil
+		}
+		bb.Append(true)
+		children, _ := quacktype.GetStructChildren(childType)
+		for ci, child := range children {
+			val, present := row[child.Name]
+			if err := appendBoxedScalar(bb.FieldBuilder(ci), child.Type, val, !present || val == nil); err != nil {
+				return err
+			}
+		}
+	default:
+		// Last-resort: stringify into a StringBuilder if that's what we got.
+		if sb, ok := b.(*array.StringBuilder); ok {
+			sb.Append(fmt.Sprintf("%v", v))
+		} else {
+			b.AppendNull()
+		}
 	}
 	return nil
 }

@@ -223,6 +223,45 @@ def test_transaction_commit_and_rollback(quack_server):
         cur.execute("DROP TABLE adbc_it_tx")
 
 
+def test_nested_types_round_trip(quack_server):
+    """LIST, STRUCT, ARRAY, MAP all surface as native nested arrow types."""
+    with _connect(quack_server) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT "
+            "  [1, 2, 3]::INTEGER[3] AS arr, "  # fixed-size ARRAY
+            "  [10, 20]::INTEGER[] AS lst, "    # variable-size LIST
+            "  {'a': 1, 'b': 'hello'} AS strct, "
+            "  MAP {'x': 1, 'y': 2} AS m"
+        )
+        table = cur.fetch_arrow_table()
+        schema = table.schema
+
+        # ARRAY<INTEGER>[3] → FixedSizeList<int32, 3>
+        assert pa.types.is_fixed_size_list(schema.field("arr").type), \
+            f"expected fixed-size list, got {schema.field('arr').type}"
+        assert schema.field("arr").type.list_size == 3
+
+        # LIST<INTEGER> → list<int32>
+        assert pa.types.is_list(schema.field("lst").type), \
+            f"expected list, got {schema.field('lst').type}"
+
+        # STRUCT(a INTEGER, b VARCHAR) → struct<a:int32, b:string>
+        assert pa.types.is_struct(schema.field("strct").type), \
+            f"expected struct, got {schema.field('strct').type}"
+
+        # MAP<VARCHAR, INTEGER> → map<string, int32>
+        assert pa.types.is_map(schema.field("m").type), \
+            f"expected map, got {schema.field('m').type}"
+
+        row = table.to_pylist()[0]
+        assert row["arr"] == [1, 2, 3]
+        assert row["lst"] == [10, 20]
+        assert row["strct"]["a"] == 1
+        assert row["strct"]["b"] == "hello"
+        m = dict(row["m"])
+        assert m == {"x": 1, "y": 2}
+
+
 def test_streaming_large_result_set(quack_server):
     """ExecuteQuery streams chunks lazily — verify a >server-batch result reads
     cleanly without OOM-ing or short-circuiting the row count."""
