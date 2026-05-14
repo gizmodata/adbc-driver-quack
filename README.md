@@ -31,11 +31,22 @@ Distributed as:
 -- in any DuckDB session, with the unsigned extensions flag enabled (`duckdb -unsigned`)
 INSTALL quack FROM core_nightly;
 LOAD quack;
-CALL quack_serve('quack:127.0.0.1:9494', token=>'my-secret-token');
+CALL quack_serve('quack:localhost:9494', token=>'my-secret-token');
 ```
 
 The server stays running until the DuckDB session exits. Press Ctrl-C in
 the DuckDB REPL to stop it.
+
+> **Note**: `quack_serve` accepts shorter forms — `'quack:localhost'`
+> uses the default port, and a bare `quack_serve()` with no first arg
+> uses `localhost` as the host. We keep the explicit `localhost:9494`
+> form throughout this README so the client-side URI maps obviously to
+> what the server is bound to.
+>
+> If `localhost` ever gives you a `connection refused` (rare, but it can
+> happen on a system whose `/etc/hosts` is set up such that the server
+> binds one address family and the client dials the other), use
+> `127.0.0.1` on *both* sides.
 
 ### 2. Install the driver
 
@@ -58,7 +69,7 @@ import adbc_driver_quack.dbapi as quack
 import pyarrow
 
 with quack.connect(
-    uri="quack://127.0.0.1:9494",
+    uri="quack://localhost:9494",
     db_kwargs={"adbc.quack.token": "my-secret-token"},
 ) as conn, conn.cursor() as cur:
     cur.execute("SELECT 42 AS answer, 'hello duckdb' AS greeting")
@@ -89,7 +100,7 @@ with dbapi.connect(
     driver=adbc_driver_quack._driver_path(),
     entrypoint="QuackDriverInit",
     db_kwargs={
-        "uri": "quack://127.0.0.1:9494",
+        "uri": "quack://localhost:9494",
         "adbc.quack.token": "my-secret-token",
     },
 ) as conn, conn.cursor() as cur:
@@ -122,7 +133,7 @@ import pyarrow as pa
 import adbc_driver_quack.dbapi as quack
 
 table = pa.table({"id": [1, 2, 3], "name": ["alice", "bob", "carol"]})
-with quack.connect(uri="quack://127.0.0.1:9494", db_kwargs={"adbc.quack.token": "..."}) as conn, conn.cursor() as cur:
+with quack.connect(uri="quack://localhost:9494", db_kwargs={"adbc.quack.token": "..."}) as conn, conn.cursor() as cur:
     cur.adbc_ingest(table_name="customers", data=table, mode="append")  # one APPEND_REQUEST per RecordBatch
 ```
 
@@ -132,7 +143,7 @@ with quack.connect(uri="quack://127.0.0.1:9494", db_kwargs={"adbc.quack.token": 
 import adbc_driver_quack.dbapi as quack
 
 with quack.connect(
-    uri="quack://127.0.0.1:9494",
+    uri="quack://localhost:9494",
     db_kwargs={"adbc.quack.token": "..."},
     autocommit=False,
 ) as conn, conn.cursor() as cur:
@@ -159,7 +170,7 @@ The URI is its own kwarg; everything else goes through `db_kwargs`:
 import adbc_driver_quack.dbapi as quack
 
 quack.connect(
-    uri="quack://127.0.0.1:9494",
+    uri="quack://localhost:9494",
     db_kwargs={
         "adbc.quack.token": "my-secret-token",
         "adbc.quack.tls": "false",

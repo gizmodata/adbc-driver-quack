@@ -6,6 +6,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.4] — 2026-05-14
+
+README-only release. Switches the quickstart from `127.0.0.1` to
+`localhost` everywhere so it matches quack's own server-side default
+(`CALL quack_serve()` with no address binds to `localhost`). With our
+transport's existing IPv4/IPv6 fallback, `localhost` is robust on
+either family — whereas `127.0.0.1` on the client only works when the
+server is also explicitly bound to IPv4.
+
+Added a short troubleshooting note for the rare `connection refused`
+case where someone's `/etc/hosts` makes the two ends pick different
+address families.
+
+No code changes from `0.1.0-alpha.3` — same wheels, just a fresh
+release so PyPI's project page renders the updated README.
+
 ## [0.1.0-alpha.3] — 2026-05-14
 
 Fixes the **packaging** for real this time. `0.1.0-alpha.2` shipped a
