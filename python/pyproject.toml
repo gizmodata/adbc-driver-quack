@@ -1,0 +1,51 @@
+[project]
+name = "adbc-driver-quack"
+description = "An Apache Arrow ADBC driver for DuckDB's Quack remote protocol."
+authors = [{ name = "GizmoData", email = "support@gizmodata.com" }]
+license = "MIT"
+license-files = ["LICENSE", "README.md"]
+readme = "README.md"
+requires-python = ">=3.10"
+dynamic = ["version"]
+dependencies = [
+    "adbc-driver-manager >=1.0.0",
+    "importlib-resources >=1.3",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: Database",
+    "Topic :: Database :: Database Engines/Servers",
+]
+
+[project.optional-dependencies]
+dbapi = ["pandas", "pyarrow >=14.0.1"]
+test = ["pandas", "pyarrow >=14.0.1", "pytest >=7"]
+
+[project.urls]
+homepage = "https://github.com/gizmodata/adbc-driver-quack"
+repository = "https://github.com/gizmodata/adbc-driver-quack"
+issues = "https://github.com/gizmodata/adbc-driver-quack/issues"
+
+[build-system]
+requires = ["setuptools >= 77.0.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+include-package-data = true
+packages = ["adbc_driver_quack"]
+
+[tool.pytest.ini_options]
+xfail_strict = true
+markers = [
+    "integration: requires a live duckdb+quack server (started by conftest.py)",
+]
