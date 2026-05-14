@@ -9,14 +9,40 @@ on:
   workflow_dispatch:
 
 # One workflow, one DAG:
-#   test   → wheels   → publish  → github-release
+#   ┌─ go-test ─┐
+#   │           ├─> wheels ──> publish (PyPI)
+#   └─ test  ───┘            ╲
+#                              └─> github-release
 #
-# - test runs on every PR, branch push, and tag push (5 Pythons × 3 OS)
-# - wheels run only on tag push, gated on test passing across the matrix
+# - go-test runs `go vet` + `go test -race ./...` on linux + macOS
+# - test runs the Python integration suite (5 Pythons × 3 OS)
+# - both run on every PR, branch push, and tag push
+# - wheels run only on tag push, gated on **both** test suites passing
 # - publish (PyPI) and github-release run only on tag push, gated on
 #   all wheels building successfully
 
 jobs:
+  go-test:
+    name: Go tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -race -timeout 5m ./...
+
   test:
     name: Python tests
     runs-on: ${{ matrix.os }}
@@ -97,7 +123,7 @@ jobs:
 
   wheels:
     name: Wheel ${{ matrix.os }} ${{ matrix.arch }}
-    needs: test
+    needs: [go-test, test]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ${{ matrix.runner }}
     strategy:
