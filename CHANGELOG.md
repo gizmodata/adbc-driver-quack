@@ -6,7 +6,43 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.1.0-alpha.1] — 2026-05-14
+## [0.1.0-alpha.2] — 2026-05-14
+
+Fixes the Windows wheel (which was broken in `0.1.0-alpha.1`).
+`0.1.0-alpha.1` is yanked from PyPI.
+
+### Fixed — Windows wheel: MSYS path translation
+
+- The CI build step that sets `ADBC_QUACK_LIBRARY` was emitting a
+  Git Bash unix-style path (`/d/a/...`) on Windows runners. Python's
+  `Path("/d/a/...")` on Windows rebases at the current drive root,
+  causing `setup.py`'s `shutil.copy` to write the DLL to the wrong
+  location. The Python wheel then shipped without the bundled DLL at
+  the expected path, and `adbc_driver_manager` could not load the
+  driver (with a confusing `Could not load \`D\`` error stemming from
+  its URI-vs-path parser hitting a path it could not stat).
+- `python.yml` now passes `$LIB_PATH` through `cygpath -m` on Windows
+  to produce a native `D:/a/...` path before writing to `$GITHUB_ENV`.
+- `setup.py` also defensively translates MSYS-style paths so local
+  Windows builds (Git Bash) work without that workflow step.
+
+### Fixed — Windows tests now block release
+
+- Removed `continue-on-error: true` from the Windows leg of the
+  `test` job. The reason for that override (DuckDB CLI install
+  fragility) no longer applies now that we use the in-process
+  `duckdb` Python package. If a Windows test fails, the wheel
+  matrix and PyPI publish are now blocked — same gate as Linux and
+  macOS.
+
+### Fixed — Windows c-shared library artifact upload
+
+- The `Upload c-shared driver library` step in `test` was conditional
+  on `matrix.os != 'windows-latest'`, dating back to the same Windows
+  best-effort era. Removed — Windows users now also get the DLL
+  uploaded as a per-OS artifact for PR review.
+
+## [0.1.0-alpha.1] — 2026-05-14 — **yanked**
 
 First publishable release. Wheels + sdist on PyPI, Go module tag
 `v0.1.0-alpha.1`, c-shared libraries (linux x86_64, linux arm64,

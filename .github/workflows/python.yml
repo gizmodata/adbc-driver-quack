@@ -46,11 +46,10 @@ jobs:
   test:
     name: Python tests
     runs-on: ${{ matrix.os }}
-    # Windows is best-effort for now — keep the CGO build in the matrix
-    # but don't block the workflow on Windows-only failures until we have
-    # more runs under our belt to trust it. Flip to false once we've seen
-    # a few consecutive green Windows runs.
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    # Windows now blocks the workflow — earlier the leg was best-effort
+    # because of the DuckDB CLI install dance; with the in-process duckdb
+    # python package fixture there's no reason to let Windows-only
+    # failures slip through. If we ship a wheel for it, tests must pass.
     strategy:
       fail-fast: false
       matrix:
@@ -91,7 +90,13 @@ jobs:
           esac
           go build -buildmode=c-shared -tags driverlib \
             -o "pkg/quack/libadbc_driver_quack.${SUFFIX}" ./pkg/quack
-          echo "ADBC_QUACK_LIBRARY=$PWD/pkg/quack/libadbc_driver_quack.${SUFFIX}" >> "$GITHUB_ENV"
+          LIB_PATH="$PWD/pkg/quack/libadbc_driver_quack.${SUFFIX}"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            # Git Bash $PWD is /d/a/... — translate to D:/a/... so that
+            # Python's pathlib and setup.py's shutil.copy can find it.
+            LIB_PATH=$(cygpath -m "$LIB_PATH")
+          fi
+          echo "ADBC_QUACK_LIBRARY=${LIB_PATH}" >> "$GITHUB_ENV"
 
       - name: Install Python wheel from source tree
         run: |
@@ -107,7 +112,7 @@ jobs:
         # same binary so we keep the 3.12 build to avoid duplicates.
         # (Use 3.12 specifically because that's the version the wheel
         # job below uses.)
-        if: matrix.python == '3.12' && matrix.os != 'windows-latest'
+        if: matrix.python == '3.12'
         uses: actions/upload-artifact@v4
         with:
           name: libadbc_driver_quack-${{ runner.os }}

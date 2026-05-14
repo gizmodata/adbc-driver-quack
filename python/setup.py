@@ -28,11 +28,29 @@ def _library_suffix() -> str:
     return "so"
 
 
+def _normalize_library_path(p: str) -> str:
+    """Translate Git Bash / MSYS unix-style paths to native Windows form.
+
+    On Windows runners (and on dev machines that build via Git Bash),
+    `$PWD` is a path like ``/d/a/repo``. ``Path("/d/a/repo")`` on Windows
+    rebases at the current drive root, not at the intended ``D:`` drive,
+    so the copy below ends up at the wrong location. We translate
+    ``/<letter>/<rest>`` to ``<letter>:/<rest>`` to dodge that.
+    """
+    if not sys.platform.startswith("win") or not p.startswith("/"):
+        return p
+    rest = p.lstrip("/")
+    if len(rest) >= 2 and rest[1] == "/" and rest[0].isalpha():
+        return f"{rest[0].upper()}:/{rest[2:]}"
+    return p
+
+
 # Bundle the c-shared library produced by `make -C ../pkg/quack`.
 library = os.environ.get("ADBC_QUACK_LIBRARY")
 target = package_dir / f"libadbc_driver_quack.{_library_suffix()}"
 
 if library:
+    library = _normalize_library_path(library)
     library_path = Path(library).resolve()
     if library_path != target.resolve() if target.exists() else target:
         shutil.copy(library_path, target)
