@@ -58,7 +58,7 @@ import adbc_driver_quack.dbapi as quack
 import pyarrow
 
 with quack.connect(
-    "quack://127.0.0.1:9494",
+    uri="quack://127.0.0.1:9494",
     db_kwargs={"adbc.quack.token": "my-secret-token"},
 ) as conn, conn.cursor() as cur:
     cur.execute("SELECT 42 AS answer, 'hello duckdb' AS greeting")
@@ -122,8 +122,8 @@ import pyarrow as pa
 import adbc_driver_quack.dbapi as quack
 
 table = pa.table({"id": [1, 2, 3], "name": ["alice", "bob", "carol"]})
-with quack.connect(...) as conn, conn.cursor() as cur:
-    cur.adbc_ingest("customers", table, mode="append")  # one APPEND_REQUEST per RecordBatch
+with quack.connect(uri="quack://127.0.0.1:9494", db_kwargs={"adbc.quack.token": "..."}) as conn, conn.cursor() as cur:
+    cur.adbc_ingest(table_name="customers", data=table, mode="append")  # one APPEND_REQUEST per RecordBatch
 ```
 
 ### Transactions (autocommit off)
@@ -131,7 +131,11 @@ with quack.connect(...) as conn, conn.cursor() as cur:
 ```python
 import adbc_driver_quack.dbapi as quack
 
-with quack.connect(..., autocommit=False) as conn, conn.cursor() as cur:
+with quack.connect(
+    uri="quack://127.0.0.1:9494",
+    db_kwargs={"adbc.quack.token": "..."},
+    autocommit=False,
+) as conn, conn.cursor() as cur:
     cur.execute("INSERT INTO orders VALUES (1, 'pending')")
     cur.execute("INSERT INTO order_items VALUES (1, 'widget', 2)")
     conn.commit()  # both inserts persist atomically
@@ -145,17 +149,17 @@ quack://host[:port]
 
 | Option              | Default | Notes                                                                    |
 |---------------------|---------|--------------------------------------------------------------------------|
-| `adbc.uri`          | —       | Required. Pass as the first positional arg to `quack.connect`.           |
+| `adbc.uri`          | —       | Required. Pass as the `uri=` kwarg to `quack.connect`.                   |
 | `adbc.quack.token`  | (none)  | Authentication token. Server-side `token=>` argument to `quack_serve()`. |
 | `adbc.quack.tls`    | `false` | `true` → use `https://` for the underlying HTTP transport.               |
 
-In Python the URL goes positional and the rest goes through `db_kwargs`:
+The URI is its own kwarg; everything else goes through `db_kwargs`:
 
 ```python
 import adbc_driver_quack.dbapi as quack
 
 quack.connect(
-    "quack://127.0.0.1:9494",
+    uri="quack://127.0.0.1:9494",
     db_kwargs={
         "adbc.quack.token": "my-secret-token",
         "adbc.quack.tls": "false",

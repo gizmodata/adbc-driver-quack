@@ -1,4 +1,10 @@
-"""End-to-end ADBC tests against a spawned duckdb+quack server."""
+"""End-to-end ADBC tests against a spawned duckdb+quack server.
+
+Several tests below mirror snippets in the project README — see each
+test's docstring for the section it covers. Keeping these in lockstep
+matters: if the README claims a pattern works, a test in this file
+must prove it does.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +18,115 @@ def _connect(server):
     import adbc_driver_quack.dbapi
 
     return adbc_driver_quack.dbapi.connect(server.uri, db_kwargs=server.db_kwargs, autocommit=True)
+
+
+def test_readme_quickstart_step3_connect_and_query(quack_server):
+    """README "Step 3: Connect and query" — the headline example."""
+    import adbc_driver_quack.dbapi as quack
+
+    with quack.connect(
+        uri=quack_server.uri,
+        db_kwargs=quack_server.db_kwargs,
+    ) as conn, conn.cursor() as cur:
+        cur.execute("SELECT 42 AS answer, 'hello duckdb' AS greeting")
+        table = cur.fetch_arrow_table()
+        assert table.num_rows == 1
+        assert table.column("answer").to_pylist() == [42]
+        assert table.column("greeting").to_pylist() == ["hello duckdb"]
+
+
+def test_readme_alternative_manager_pattern(quack_server):
+    """README "Alternative: drive adbc_driver_manager directly".
+
+    Verifies that passing the bundled driver path + entrypoint to
+    adbc_driver_manager.dbapi.connect works identically to the wrapper.
+    """
+    from adbc_driver_manager import dbapi
+    import adbc_driver_quack
+
+    with dbapi.connect(
+        driver=adbc_driver_quack._driver_path(),
+        entrypoint="QuackDriverInit",
+        db_kwargs={
+            "uri": quack_server.uri,
+            **quack_server.db_kwargs,
+        },
+    ) as conn, conn.cursor() as cur:
+        cur.execute("SELECT 42 AS answer")
+        rows = cur.fetch_arrow_table().to_pylist()
+        assert rows == [{"answer": 42}]
+
+
+def test_readme_streaming_large_result_set(quack_server):
+    """README "Streaming large result sets" — fetch_record_batch loop."""
+    import adbc_driver_quack.dbapi as quack
+
+    with quack.connect(
+        uri=quack_server.uri,
+        db_kwargs=quack_server.db_kwargs,
+    ) as conn, conn.cursor() as cur:
+        cur.execute("SELECT i AS n FROM range(0, 50000) t(i)")
+        reader = cur.fetch_record_batch()
+        total = 0
+        for batch in reader:
+            total += batch.num_rows  # one ~2k-row Arrow batch at a time
+        assert total == 50_000
+
+
+def test_readme_bulk_ingest(quack_server):
+    """README "Bulk ingest (Arrow → DuckDB)" — adbc_ingest example."""
+    import adbc_driver_quack.dbapi as quack
+
+    with quack.connect(
+        uri=quack_server.uri,
+        db_kwargs=quack_server.db_kwargs,
+    ) as conn, conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS customers")
+        cur.execute("CREATE TABLE customers (id INTEGER, name VARCHAR)")
+        try:
+            table = pa.table({"id": [1, 2, 3], "name": ["alice", "bob", "carol"]})
+            cur.adbc_ingest(table_name="customers", data=table, mode="append")
+            cur.execute("SELECT COUNT(*) AS n FROM customers")
+            row = cur.fetch_arrow_table().to_pylist()[0]
+            assert row["n"] == 3
+        finally:
+            cur.execute("DROP TABLE customers")
+
+
+def test_readme_transactions(quack_server):
+    """README "Transactions (autocommit off)" — explicit commit example."""
+    import adbc_driver_quack.dbapi as quack
+
+    with quack.connect(
+        uri=quack_server.uri,
+        db_kwargs=quack_server.db_kwargs,
+        autocommit=True,
+    ) as conn, conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS orders")
+        cur.execute("CREATE TABLE orders (id INTEGER, status VARCHAR)")
+        cur.execute("DROP TABLE IF EXISTS order_items")
+        cur.execute("CREATE TABLE order_items (order_id INTEGER, name VARCHAR, qty INTEGER)")
+
+    with quack.connect(
+        uri=quack_server.uri,
+        db_kwargs=quack_server.db_kwargs,
+        autocommit=False,
+    ) as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO orders VALUES (1, 'pending')")
+        cur.execute("INSERT INTO order_items VALUES (1, 'widget', 2)")
+        conn.commit()  # both inserts persist atomically
+
+    with quack.connect(
+        uri=quack_server.uri,
+        db_kwargs=quack_server.db_kwargs,
+        autocommit=True,
+    ) as conn, conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM orders")
+        assert cur.fetch_arrow_table().to_pylist()[0]["n"] == 1
+        cur.execute("SELECT COUNT(*) AS n FROM order_items")
+        assert cur.fetch_arrow_table().to_pylist()[0]["n"] == 1
+        cur.execute("DROP TABLE order_items")
+        cur.execute("DROP TABLE orders")
 
 
 def test_connect_and_select(quack_server):
