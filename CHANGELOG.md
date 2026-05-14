@@ -75,7 +75,27 @@ arm64, windows x86_64) attached to the GitHub Release with
   Python release cadence. `pyproject.toml` classifiers updated to
   match.
 
-### Added — Quickstart in README
+### Changed — Integration test fixture uses in-process DuckDB
+
+- `python/tests/conftest.py` now spins up DuckDB via the official
+  [`duckdb`](https://pypi.org/project/duckdb/) Python package
+  (`duckdb.connect(":memory:", config={"allow_unsigned_extensions": "true"})`)
+  instead of spawning the `duckdb` CLI as a subprocess. The Quack
+  listener runs in a background thread inside DuckDB; the test client
+  connects to `quack://127.0.0.1:<port>` exactly as it would against a
+  real deployed server.
+- Removes the `Install DuckDB CLI` steps from `python.yml` (which was
+  the most fragile part of the Windows CI leg — `Invoke-WebRequest` →
+  unzip → prepend to PATH). Windows CI now does the same `pip install`
+  every other platform does.
+- New `duckdb >=1.5.2` entry in the `test` optional-dependencies group
+  in `pyproject.toml` so the fixture's dependency is hermetic and
+  pinnable.
+- All 20 integration tests pass unchanged — the only thing that
+  changed is *how the server starts*, not the wire protocol or the
+  driver behavior.
+
+### Quickstart in README
 
 - Top-of-README quickstart with `pip install`, a 3-line connect +
   fetch snippet, a streaming-large-result example, a bulk-ingest

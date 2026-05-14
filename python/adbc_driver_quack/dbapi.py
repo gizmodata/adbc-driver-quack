@@ -105,9 +105,11 @@ def connect(
     db = None
     conn = None
     try:
-        db = adbc_driver_quack.connect(uri, db_kwargs=db_kwargs)
+        db = adbc_driver_quack.connect(uri=uri, db_kwargs=db_kwargs)
         conn = adbc_driver_manager.AdbcConnection(db, **(conn_kwargs or {}))
-        return adbc_driver_manager.dbapi.Connection(db, conn, autocommit=autocommit)
+        return adbc_driver_manager.dbapi.Connection(
+            db=db, conn=conn, autocommit=autocommit
+        )
     except Exception:
         if conn is not None:
             try:

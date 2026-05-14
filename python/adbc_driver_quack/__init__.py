@@ -97,5 +97,7 @@ def connect(
     """
     kwargs = {"driver": _driver_path(), "entrypoint": "QuackDriverInit", "uri": uri}
     if db_kwargs:
+        # dict.update is a C-extension method whose kwargs become new
+        # dict keys, not a merge target — so the merge arg stays positional.
         kwargs.update(db_kwargs)
     return adbc_driver_manager.AdbcDatabase(**kwargs)
