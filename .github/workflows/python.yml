@@ -128,9 +128,13 @@ jobs:
             python/*.log
 
   wheels:
+    # Builds the wheel AND smoke-tests it from a clean venv, so
+    # packaging bugs (wrong-binary-bundled, missing dep, wrong platform
+    # tag, etc.) trip CI before publish — not after a PyPI release.
+    # Runs on every PR / branch / tag push; only publish + release jobs
+    # are tag-gated.
     name: Wheel ${{ matrix.os }} ${{ matrix.arch }}
     needs: [go-test, test]
-    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -189,6 +193,38 @@ jobs:
           python -m pip install --upgrade pip build
           python -m build --wheel
           ls -la dist/
+
+      - name: Smoke-test wheel in a clean venv
+        # Install the freshly built wheel into a fresh venv (no source
+        # tree on PYTHONPATH) and run the integration suite from a copy
+        # of python/tests/ outside the repo. Catches bugs that the
+        # editable-install path in the `test` job can't see:
+        #   - wrong/missing binary in the wheel (py3-none-any.whl trap)
+        #   - missing runtime dep (pyarrow was once in dbapi extra)
+        #   - import paths broken in installed layout
+        shell: bash
+        run: |
+          set -e
+          VENV="${RUNNER_TEMP}/wheel-smoke-venv"
+          rm -rf "$VENV"
+          python -m venv "$VENV"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            VPY="$VENV/Scripts/python.exe"
+          else
+            VPY="$VENV/bin/python"
+          fi
+          "$VPY" -m pip install --upgrade pip --quiet
+          WHEEL=$(ls dist/*.whl | head -1)
+          echo "Installing $WHEEL plus test dependencies"
+          "$VPY" -m pip install "$WHEEL" pytest "duckdb>=1.5.2" pandas --quiet
+          # Run tests from a copy outside the source tree so the package
+          # has to resolve via the wheel install, not the source dir.
+          TESTS="${RUNNER_TEMP}/wheel-smoke-tests"
+          rm -rf "$TESTS"
+          cp -R python/tests "$TESTS"
+          cd "$TESTS"
+          "$VPY" -m pytest -v -m integration \
+            --override-ini='markers=integration: integration tests' .
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
