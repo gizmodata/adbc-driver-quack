@@ -24,6 +24,10 @@ keywords = [
 dependencies = [
     "adbc-driver-manager >=1.0.0",
     "importlib-resources >=1.3",
+    # pyarrow is required for any DBAPI cursor method that returns
+    # Arrow data (fetch_arrow_table, fetch_record_batch, etc.) — i.e.
+    # every quickstart example in the README. Real dep, not optional.
+    "pyarrow >=14.0.1",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -41,8 +45,8 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-dbapi = ["pandas", "pyarrow >=14.0.1"]
-test = ["pandas", "pyarrow >=14.0.1", "pytest >=7", "duckdb >=1.5.2"]
+dbapi = ["pandas"]
+test = ["pandas", "pytest >=7", "duckdb >=1.5.2"]
 
 [project.urls]
 homepage = "https://github.com/gizmodata/adbc-driver-quack"

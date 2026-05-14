@@ -6,7 +6,40 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.1.0-alpha.2] — 2026-05-14
+## [0.1.0-alpha.3] — 2026-05-14
+
+Fixes the **packaging** for real this time. `0.1.0-alpha.2` shipped a
+single `py3-none-any.whl` that contained whichever platform binary
+happened to upload last (Windows `.dll`, as it turns out). macOS and
+Linux users got a wheel with no usable binary and saw
+`FileNotFoundError: ... Looked for: libadbc_driver_quack.dylib`.
+`0.1.0-alpha.2` is yanked.
+
+### Fixed — Wheel platform tagging
+
+- `setup.py` now declares a `BinaryDistribution` subclass of
+  `setuptools.dist.Distribution` whose `has_ext_modules()` returns
+  `True`. setuptools picks up that signal and tags each wheel with
+  the build host's platform (e.g. `macosx_11_0_arm64`,
+  `linux_x86_64`, `linux_aarch64`, `win_amd64`) instead of the
+  default `py3-none-any`.
+- All four matrix wheels (linux x86_64, linux arm64, macOS arm64,
+  windows x86_64) now have distinct filenames, all land on PyPI, and
+  `pip install adbc-driver-quack` selects the right one per user
+  platform.
+
+### Fixed — `pyarrow` is now a core dependency
+
+- `cursor.fetch_arrow_table()` / `cursor.fetch_record_batch()` (every
+  quickstart example) require `pyarrow`. Previously it lived in the
+  `dbapi` optional extra, which meant `pip install adbc-driver-quack`
+  alone would import-error the first time a user called
+  `fetch_arrow_table()`.
+- Moved to the main `dependencies` list. The `dbapi` extra now only
+  carries `pandas` (still optional — only needed for pandas-side
+  conversions).
+
+## [0.1.0-alpha.2] — 2026-05-14 — **yanked**
 
 Fixes the Windows wheel (which was broken in `0.1.0-alpha.1`) and
 puts the rich README on PyPI. `0.1.0-alpha.1` is yanked from PyPI.

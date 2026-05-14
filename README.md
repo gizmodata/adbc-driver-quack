@@ -48,7 +48,7 @@ pip install adbc-driver-quack
 **Go:**
 
 ```bash
-go get github.com/gizmodata/adbc-driver-quack@v0.1.0-alpha.1
+go get github.com/gizmodata/adbc-driver-quack@latest
 ```
 
 ### 3. Connect and query

@@ -16,9 +16,43 @@ import sys
 from pathlib import Path
 
 from setuptools import setup
+from setuptools.command.bdist_wheel import bdist_wheel
+from setuptools.dist import Distribution
 
 source_root = Path(__file__).parent
 package_dir = source_root / "python" / "adbc_driver_quack"
+
+
+class BinaryDistribution(Distribution):
+    """Force setuptools to build a platform-specific wheel.
+
+    Without this, setuptools defaults to ``py3-none-any.whl`` for every
+    matrix entry — and since they share a filename, only the last one
+    uploaded to PyPI survives. With ``has_ext_modules`` returning True
+    setuptools writes a per-platform tag and pip picks the right wheel
+    per user platform.
+    """
+
+    def has_ext_modules(self):  # noqa: D401
+        return True
+
+
+class BinaryWheel(bdist_wheel):
+    """Tag wheels as ``py3-none-<platform>`` rather than
+    ``cp<ver>-cp<ver>-<platform>``.
+
+    Our bundled c-shared library isn't a CPython extension — it's an
+    arbitrary native lib loaded via ``ctypes`` / ``adbc_driver_manager``.
+    Any CPython 3.10+ can load it. Without this override, setuptools
+    would tag each wheel with the Python ABI of the build host
+    (e.g. ``cp314-cp314-macosx_..``), which means we'd need
+    5 Pythons × 4 platforms = 20 wheels per release. With it, we need
+    one wheel per platform — 4 total.
+    """
+
+    def get_tag(self):  # noqa: D401
+        _python, _abi, plat = bdist_wheel.get_tag(self)
+        return ("py3", "none", plat)
 
 
 def _library_suffix() -> str:
@@ -81,4 +115,8 @@ def _read_version(pkg_path: Path) -> str:
     return module.__version__  # type: ignore[attr-defined]
 
 
-setup(version=_read_version(package_dir))
+setup(
+    version=_read_version(package_dir),
+    distclass=BinaryDistribution,
+    cmdclass={"bdist_wheel": BinaryWheel},
+)
