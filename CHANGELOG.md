@@ -6,6 +6,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — Real `Commit` / `Rollback` (autocommit-off transactions)
+
+- `Connection.SetOption("adbc.connection.autocommit", "false")` now
+  issues `BEGIN TRANSACTION` on the server. Flipping it back to
+  `"true"` commits any pending tx.
+- `Connection.Commit()` issues `COMMIT` then re-opens a fresh
+  `BEGIN TRANSACTION` so the next statement still runs inside a
+  transaction (the ADBC contract).
+- `Connection.Rollback()` issues `ROLLBACK` and similarly re-opens.
+- `Connection.Close()` rolls back any outstanding transaction so we
+  don't leak server-side state when callers forget.
+- Both `Commit` and `Rollback` return `StatusInvalidState` if called
+  while autocommit is still on (matches ADBC's documented contract).
+- New Python integration test exercises the full roundtrip: insert +
+  commit (persists), insert + rollback (discarded), insert + commit
+  (persists), then verifies `SELECT … ORDER BY id` returns `[1, 3]`.
+- SQL shape mirrors the `BEGIN TRANSACTION` / `COMMIT` / `ROLLBACK`
+  pattern in `gizmosql`'s
+  `DuckDBTransactionGuard` / `BeginTransaction` / `EndTransaction`.
+
 ### Fixed — Python integration tests (11/11 passing locally)
 
 - `Connection.GetInfo` and `Connection.GetObjects` are now properly

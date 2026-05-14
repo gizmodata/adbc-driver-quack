@@ -80,18 +80,27 @@ func (d *databaseImpl) Open(ctx context.Context) (adbc.Connection, error) {
 	if err != nil {
 		return nil, fromTransportError(err)
 	}
-	return &connectionImpl{db: d, sess: s, alloc: d.alloc}, nil
+	// Default to ADBC's autocommit ON, matching DuckDB's own default.
+	return &connectionImpl{db: d, sess: s, alloc: d.alloc, autoCommit: true}, nil
 }
 
 func (d *databaseImpl) Close() error { return nil }
 
 type connectionImpl struct {
-	db    *databaseImpl
-	sess  *session
-	alloc memory.Allocator
+	db         *databaseImpl
+	sess       *session
+	alloc      memory.Allocator
+	autoCommit bool
+	txOpen     bool // true when we have issued BEGIN TRANSACTION but not yet COMMIT/ROLLBACK
 }
 
 func (c *connectionImpl) Close() error {
+	// If a manual transaction is still open at close, roll it back rather
+	// than leak it on the server.
+	if c.txOpen {
+		_ = c.execNoResult(context.Background(), "ROLLBACK")
+		c.txOpen = false
+	}
 	return c.sess.close(context.Background())
 }
 
@@ -118,11 +127,96 @@ func (c *connectionImpl) GetTableTypes(ctx context.Context) (array.RecordReader,
 	return c.getTableTypesImpl(ctx)
 }
 
-func (c *connectionImpl) Commit(_ context.Context) error                            { return nil }
-func (c *connectionImpl) Rollback(_ context.Context) error                          { return nil }
-func (c *connectionImpl) SetOption(string, string) error                            { return nil }
+// Commit ends the current manual transaction (if any) with COMMIT and
+// then re-opens a fresh BEGIN if autocommit is still off, so the next
+// statement runs inside a new transaction.
+func (c *connectionImpl) Commit(ctx context.Context) error {
+	if c.autoCommit {
+		return errStatus(adbc.StatusInvalidState, "Commit called while autocommit is enabled")
+	}
+	if !c.txOpen {
+		// No outstanding transaction — nothing to commit. Be lenient.
+		return c.beginTx(ctx)
+	}
+	if err := c.execNoResult(ctx, "COMMIT"); err != nil {
+		return fromTransportError(err)
+	}
+	c.txOpen = false
+	return c.beginTx(ctx)
+}
+
+// Rollback aborts the current manual transaction (if any) and re-opens
+// a fresh BEGIN so the next statement still runs inside a transaction.
+func (c *connectionImpl) Rollback(ctx context.Context) error {
+	if c.autoCommit {
+		return errStatus(adbc.StatusInvalidState, "Rollback called while autocommit is enabled")
+	}
+	if !c.txOpen {
+		return c.beginTx(ctx)
+	}
+	if err := c.execNoResult(ctx, "ROLLBACK"); err != nil {
+		return fromTransportError(err)
+	}
+	c.txOpen = false
+	return c.beginTx(ctx)
+}
+
+// SetOption handles connection-level options. Only autocommit toggling
+// has a side effect today; other keys are recognized but otherwise no-op.
+func (c *connectionImpl) SetOption(key, value string) error {
+	switch key {
+	case adbc.OptionKeyAutoCommit:
+		switch value {
+		case adbc.OptionValueEnabled:
+			if c.autoCommit {
+				return nil
+			}
+			// Disabling -> enabling: commit any pending tx, then go autocommit.
+			if c.txOpen {
+				if err := c.execNoResult(context.Background(), "COMMIT"); err != nil {
+					return fromTransportError(err)
+				}
+				c.txOpen = false
+			}
+			c.autoCommit = true
+			return nil
+		case adbc.OptionValueDisabled:
+			if !c.autoCommit {
+				return nil
+			}
+			c.autoCommit = false
+			return c.beginTx(context.Background())
+		default:
+			return errStatus(adbc.StatusInvalidArgument,
+				"unknown value %q for %s; expected %q or %q",
+				value, key, adbc.OptionValueEnabled, adbc.OptionValueDisabled)
+		}
+	}
+	return nil
+}
+
 func (c *connectionImpl) ReadPartition(context.Context, []byte) (array.RecordReader, error) {
 	return nil, errStatus(adbc.StatusNotImplemented, "ReadPartition")
+}
+
+// beginTx issues BEGIN TRANSACTION. Idempotent: if a tx is already open
+// we silently do nothing.
+func (c *connectionImpl) beginTx(ctx context.Context) error {
+	if c.txOpen {
+		return nil
+	}
+	if err := c.execNoResult(ctx, "BEGIN TRANSACTION"); err != nil {
+		return fromTransportError(err)
+	}
+	c.txOpen = true
+	return nil
+}
+
+// execNoResult runs a side-effectful SQL statement (BEGIN/COMMIT/ROLLBACK)
+// and discards the result chunks.
+func (c *connectionImpl) execNoResult(ctx context.Context, sql string) error {
+	_, err := c.sess.prepare(ctx, sql)
+	return err
 }
 
 // statementImpl implements adbc.Statement.

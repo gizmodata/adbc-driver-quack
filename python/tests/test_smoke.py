@@ -192,6 +192,34 @@ def test_get_objects_returns_primary_and_foreign_keys(quack_server):
             cur.execute("DROP TABLE IF EXISTS adbc_it_users")
 
 
+def test_transaction_commit_and_rollback(quack_server):
+    """When autocommit is off, Commit persists writes and Rollback discards them."""
+    import adbc_driver_quack.dbapi
+
+    with _connect(quack_server) as conn, conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS adbc_it_tx")
+        cur.execute("CREATE TABLE adbc_it_tx (id INTEGER)")
+
+    # Disable autocommit, insert one row, commit; then insert + rollback.
+    with adbc_driver_quack.dbapi.connect(
+        quack_server.uri, db_kwargs=quack_server.db_kwargs, autocommit=False
+    ) as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO adbc_it_tx VALUES (1)")
+        conn.commit()
+
+        cur.execute("INSERT INTO adbc_it_tx VALUES (2)")
+        conn.rollback()
+
+        cur.execute("INSERT INTO adbc_it_tx VALUES (3)")
+        conn.commit()
+
+    with _connect(quack_server) as conn, conn.cursor() as cur:
+        cur.execute("SELECT id FROM adbc_it_tx ORDER BY id")
+        ids = [r["id"] for r in cur.fetch_arrow_table().to_pylist()]
+        assert ids == [1, 3], f"expected [1, 3] (2 should have rolled back), got {ids}"
+        cur.execute("DROP TABLE adbc_it_tx")
+
+
 def test_bad_token_rejected(quack_server):
     """A wrong token must raise during connect (server fails CONNECTION_REQUEST)."""
     import adbc_driver_quack.dbapi
