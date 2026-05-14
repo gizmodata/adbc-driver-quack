@@ -23,21 +23,45 @@ Distributed as:
 > driver is the same protocol from the JVM and is at
 > [v0.1.0-alpha.1 on Maven Central](https://central.sonatype.com/artifact/com.gizmodata/quack-jdbc/0.1.0-alpha.1).
 
-## Quickstart (Python)
+## Quickstart
+
+### 1. Start a Quack server (any DuckDB v1.5.2+)
+
+```sql
+-- in any DuckDB session, with the unsigned extensions flag enabled (`duckdb -unsigned`)
+INSTALL quack FROM core_nightly;
+LOAD quack;
+CALL quack_serve('quack:127.0.0.1:9494', token=>'my-secret-token');
+```
+
+The server stays running until the DuckDB session exits. Press Ctrl-C in
+the DuckDB REPL to stop it.
+
+### 2. Install the driver
+
+**Python:**
 
 ```bash
 pip install adbc-driver-quack
 ```
 
+**Go:**
+
+```bash
+go get github.com/gizmodata/adbc-driver-quack@v0.1.0-alpha.1
+```
+
+### 3. Connect and query
+
 ```python
-import adbc_driver_quack.dbapi
+import adbc_driver_quack.dbapi as quack
 import pyarrow
 
-with adbc_driver_quack.dbapi.connect(
+with quack.connect(
     "quack://127.0.0.1:9494",
-    db_kwargs={"adbc.quack.token": "my-token"},
+    db_kwargs={"adbc.quack.token": "my-secret-token"},
 ) as conn, conn.cursor() as cur:
-    cur.execute("SELECT 42 AS answer, 'hello' AS greeting")
+    cur.execute("SELECT 42 AS answer, 'hello duckdb' AS greeting")
     table: pyarrow.Table = cur.fetch_arrow_table()
     print(table)
 ```
@@ -69,19 +93,48 @@ with conn.cursor() as cur:
 
 ```python
 import pyarrow as pa
+import adbc_driver_quack.dbapi as quack
 
 table = pa.table({"id": [1, 2, 3], "name": ["alice", "bob", "carol"]})
-with adbc_driver_quack.dbapi.connect(...) as conn, conn.cursor() as cur:
+with quack.connect(...) as conn, conn.cursor() as cur:
     cur.adbc_ingest("customers", table, mode="append")  # one APPEND_REQUEST per RecordBatch
 ```
 
 ### Transactions (autocommit off)
 
 ```python
-with adbc_driver_quack.dbapi.connect(..., autocommit=False) as conn, conn.cursor() as cur:
+import adbc_driver_quack.dbapi as quack
+
+with quack.connect(..., autocommit=False) as conn, conn.cursor() as cur:
     cur.execute("INSERT INTO orders VALUES (1, 'pending')")
     cur.execute("INSERT INTO order_items VALUES (1, 'widget', 2)")
     conn.commit()  # both inserts persist atomically
+```
+
+## Connection URL
+
+```
+quack://host[:port]
+```
+
+| Option              | Default | Notes                                                                    |
+|---------------------|---------|--------------------------------------------------------------------------|
+| `adbc.uri`          | —       | Required. Pass as the first positional arg to `quack.connect`.           |
+| `adbc.quack.token`  | (none)  | Authentication token. Server-side `token=>` argument to `quack_serve()`. |
+| `adbc.quack.tls`    | `false` | `true` → use `https://` for the underlying HTTP transport.               |
+
+In Python the URL goes positional and the rest goes through `db_kwargs`:
+
+```python
+import adbc_driver_quack.dbapi as quack
+
+quack.connect(
+    "quack://127.0.0.1:9494",
+    db_kwargs={
+        "adbc.quack.token": "my-secret-token",
+        "adbc.quack.tls": "false",
+    },
+)
 ```
 
 ## Why ADBC and not JDBC?
