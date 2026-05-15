@@ -6,6 +6,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.6] — 2026-05-15
+
+### Fixed — README bulk-ingest example silently lost data
+
+- The `0.1.0-alpha.5` README "Bulk ingest" snippet used the default
+  `quack.connect()`, which (per PEP 249) is **autocommit-off**. The
+  `CREATE` + append ran in a transaction that was rolled back when the
+  `with` block closed the connection: `adbc_ingest` returned the row
+  count it sent, but nothing persisted. The example now passes
+  `autocommit=True`, with a prominent note plus an explicit
+  `conn.commit()` variant for the transactional path.
+- Hardened the regression test: `test_readme_bulk_ingest` now re-reads
+  from a **fresh connection** to prove persistence (the old test read
+  back on the same uncommitted transaction, so it never caught this),
+  and a new `test_readme_bulk_ingest_explicit_commit` pins both the
+  rollback-on-close footgun and the `conn.commit()` path.
+
+No driver code changes from `0.1.0-alpha.5` — the bulk-ingest modes
+themselves were correct; only the documented usage was wrong.
+
 ## [0.1.0-alpha.5] — 2026-05-15
 
 ### Added — Bulk-ingest modes

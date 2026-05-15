@@ -74,26 +74,70 @@ def test_readme_streaming_large_result_set(quack_server):
 
 
 def test_readme_bulk_ingest(quack_server):
-    """README "Bulk ingest (Arrow → DuckDB)" — adbc_ingest example.
+    """README "Bulk ingest (Arrow → DuckDB)" — the autocommit=True snippet.
 
-    Mirrors the README snippet exactly: create_append mode, no manual
-    CREATE TABLE — the driver builds the table from the Arrow schema.
+    Mirrors the README exactly (create_append, no manual CREATE TABLE)
+    AND verifies the rows survive the connection close by re-reading
+    from a *fresh* connection. ADBC connections are autocommit-OFF by
+    default, so without autocommit=True the ingest would roll back on
+    close — reading back on the same connection would hide that.
     """
     import adbc_driver_quack.dbapi as quack
 
+    table = pa.table({"id": [1, 2, 3], "name": ["alice", "bob", "carol"]})
     with quack.connect(
         uri=quack_server.uri,
         db_kwargs=quack_server.db_kwargs,
+        autocommit=True,
     ) as conn, conn.cursor() as cur:
         cur.execute("DROP TABLE IF EXISTS customers")
-        try:
-            table = pa.table({"id": [1, 2, 3], "name": ["alice", "bob", "carol"]})
-            cur.adbc_ingest(table_name="customers", data=table, mode="create_append")
+        cur.adbc_ingest(table_name="customers", data=table, mode="create_append")
+
+    # Fresh connection — proves the data actually persisted (regression
+    # guard for the autocommit-off footgun the README warns about).
+    try:
+        with _connect(quack_server) as conn, conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) AS n FROM customers")
-            row = cur.fetch_arrow_table().to_pylist()[0]
-            assert row["n"] == 3
-        finally:
-            cur.execute("DROP TABLE customers")
+            assert cur.fetch_arrow_table().to_pylist()[0]["n"] == 3
+    finally:
+        with _connect(quack_server) as conn, conn.cursor() as cur:
+            cur.execute("DROP TABLE IF EXISTS customers")
+
+
+def test_readme_bulk_ingest_explicit_commit(quack_server):
+    """README bulk-ingest "explicit transaction" variant: default
+    autocommit-off connection + conn.commit() after adbc_ingest.
+
+    Also pins the documented footgun: without the commit, a fresh
+    connection must NOT see the table (rolled back on close).
+    """
+    import adbc_driver_quack.dbapi as quack
+
+    table = pa.table({"id": [1, 2, 3], "name": ["alice", "bob", "carol"]})
+
+    # No commit → rolled back on close → table must not exist afterwards.
+    with quack.connect(
+        uri=quack_server.uri, db_kwargs=quack_server.db_kwargs,
+    ) as conn, conn.cursor() as cur:
+        cur.adbc_ingest(table_name="customers", data=table, mode="create_append")
+    with _connect(quack_server) as conn, conn.cursor() as cur:
+        with pytest.raises(Exception):
+            cur.execute("SELECT COUNT(*) AS n FROM customers")
+            cur.fetch_arrow_table()
+
+    # With conn.commit() → persists.
+    try:
+        with quack.connect(
+            uri=quack_server.uri, db_kwargs=quack_server.db_kwargs,
+        ) as conn, conn.cursor() as cur:
+            cur.adbc_ingest(table_name="customers", data=table, mode="create_append")
+            conn.commit()
+        with _connect(quack_server) as conn, conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM customers")
+            assert cur.fetch_arrow_table().to_pylist()[0]["n"] == 3
+    finally:
+        with _connect(quack_server) as conn, conn.cursor() as cur:
+            cur.execute("DROP TABLE IF EXISTS customers")
 
 
 def test_bulk_ingest_mode_create(quack_server):

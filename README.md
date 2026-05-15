@@ -136,11 +136,28 @@ table = pa.table({"id": [1, 2, 3], "name": ["alice", "bob", "carol"]})
 with quack.connect(
     uri="quack://localhost:9494",
     db_kwargs={"adbc.quack.token": "my-secret-token"},
+    autocommit=True,  # ADBC connections are autocommit-OFF by default;
+                      # opt in here so the ingest persists on close
 ) as conn, conn.cursor() as cur:
     # create_append: create "customers" from the Arrow schema if it
     # doesn't exist, then append. One APPEND_REQUEST per RecordBatch.
     cur.adbc_ingest(table_name="customers", data=table, mode="create_append")
 ```
+
+> **Heads-up — autocommit is off by default.** Per the Python DB-API,
+> `quack.connect()` opens connections inside a transaction. Without the
+> `autocommit=True` above (or an explicit `conn.commit()`), the
+> `CREATE` + append run in a transaction that is **rolled back when the
+> connection closes** — `adbc_ingest` still returns the row count it
+> sent, but nothing persists. Prefer explicit transactions? Drop
+> `autocommit=True` and call `conn.commit()` after `adbc_ingest()`:
+>
+> ```python
+> with quack.connect(uri="quack://localhost:9494",
+>                     db_kwargs={"adbc.quack.token": "my-secret-token"}) as conn, conn.cursor() as cur:
+>     cur.adbc_ingest(table_name="customers", data=table, mode="create_append")
+>     conn.commit()  # without this, the ingest is rolled back on close
+> ```
 
 `mode` accepts the four standard ADBC ingest modes:
 
