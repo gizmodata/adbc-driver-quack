@@ -133,9 +133,26 @@ import pyarrow as pa
 import adbc_driver_quack.dbapi as quack
 
 table = pa.table({"id": [1, 2, 3], "name": ["alice", "bob", "carol"]})
-with quack.connect(uri="quack://localhost:9494", db_kwargs={"adbc.quack.token": "..."}) as conn, conn.cursor() as cur:
-    cur.adbc_ingest(table_name="customers", data=table, mode="append")  # one APPEND_REQUEST per RecordBatch
+with quack.connect(
+    uri="quack://localhost:9494",
+    db_kwargs={"adbc.quack.token": "my-secret-token"},
+) as conn, conn.cursor() as cur:
+    # create_append: create "customers" from the Arrow schema if it
+    # doesn't exist, then append. One APPEND_REQUEST per RecordBatch.
+    cur.adbc_ingest(table_name="customers", data=table, mode="create_append")
 ```
+
+`mode` accepts the four standard ADBC ingest modes:
+
+| mode            | behavior                                                  |
+|-----------------|-----------------------------------------------------------|
+| `create`        | create the table (errors if it already exists), then append — this is the default when `mode` is omitted |
+| `append`        | append to an existing table (no DDL; errors if missing)   |
+| `replace`       | `CREATE OR REPLACE` the table, then append                |
+| `create_append` | create the table if it doesn't exist, then append         |
+
+Table DDL for the create-family modes is generated from the Arrow
+schema. Pass `db_schema_name=...` to target a non-default schema.
 
 ### Transactions (autocommit off)
 

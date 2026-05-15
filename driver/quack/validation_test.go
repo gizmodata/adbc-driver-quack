@@ -21,7 +21,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 	"testing"
 
 	"github.com/apache/arrow-adbc/go/adbc"
@@ -60,9 +59,14 @@ func (q *quackQuirks) DatabaseOptions() map[string]string {
 func (q *quackQuirks) BindParameter(_ int) string { return "?" }
 
 func (q *quackQuirks) SupportsBulkIngest(mode string) bool {
-	// We support the APPEND_REQUEST path for append-mode ingest; create /
-	// create_append are not yet implemented.
-	return mode == adbc.OptionValueIngestModeAppend
+	switch mode {
+	case adbc.OptionValueIngestModeCreate,
+		adbc.OptionValueIngestModeAppend,
+		adbc.OptionValueIngestModeReplace,
+		adbc.OptionValueIngestModeCreateAppend:
+		return true
+	}
+	return false
 }
 
 func (q *quackQuirks) SupportsConcurrentStatements() bool          { return true }
@@ -113,12 +117,12 @@ func (q *quackQuirks) CreateSampleTable(tableName string, r arrow.RecordBatch) e
 	}
 	defer stmt.Close()
 
-	// CREATE
-	cols := []string{}
-	for _, f := range r.Schema().Fields() {
-		cols = append(cols, fmt.Sprintf("%s %s", f.Name, arrowToDuckDBType(f.Type)))
+	// CREATE — reuse the driver's own DDL builder so the conformance
+	// suite exercises the exact CREATE path bulk-ingest uses.
+	createSQL, err := buildCreateTableSQL("", tableName, r.Schema(), false, true, false)
+	if err != nil {
+		return err
 	}
-	createSQL := fmt.Sprintf("CREATE OR REPLACE TABLE %s (%s)", tableName, strings.Join(cols, ", "))
 	if err := stmt.SetSqlQuery(createSQL); err != nil {
 		return err
 	}
@@ -158,45 +162,6 @@ func (q *quackQuirks) DropTable(conn adbc.Connection, tableName string) error {
 func (q *quackQuirks) Catalog() string         { return "memory" }
 func (q *quackQuirks) DBSchema() string        { return "main" }
 func (q *quackQuirks) Alloc() memory.Allocator { return q.alloc }
-
-// arrowToDuckDBType is the minimal type printer needed for
-// CreateSampleTable. Mirrors the inverse of arrowTypeForDuckDBName in
-// metadata.go.
-func arrowToDuckDBType(t arrow.DataType) string {
-	switch t.ID() {
-	case arrow.BOOL:
-		return "BOOLEAN"
-	case arrow.INT8:
-		return "TINYINT"
-	case arrow.INT16:
-		return "SMALLINT"
-	case arrow.INT32:
-		return "INTEGER"
-	case arrow.INT64:
-		return "BIGINT"
-	case arrow.UINT8:
-		return "UTINYINT"
-	case arrow.UINT16:
-		return "USMALLINT"
-	case arrow.UINT32:
-		return "UINTEGER"
-	case arrow.UINT64:
-		return "UBIGINT"
-	case arrow.FLOAT32:
-		return "FLOAT"
-	case arrow.FLOAT64:
-		return "DOUBLE"
-	case arrow.STRING:
-		return "VARCHAR"
-	case arrow.BINARY:
-		return "BLOB"
-	case arrow.DATE32:
-		return "DATE"
-	case arrow.TIMESTAMP:
-		return "TIMESTAMP"
-	}
-	return "VARCHAR"
-}
 
 // TestValidation runs the apache/arrow-adbc generic conformance suite
 // against a live Quack server. Skipped unless QUACK_VALIDATION_URI is

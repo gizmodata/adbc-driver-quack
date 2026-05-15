@@ -227,8 +227,12 @@ type statementImpl struct {
 	closed       bool
 	targetTable  string
 	targetSchema string
-	bound        arrow.Record
-	boundStream  array.RecordReader
+	// ingestMode is one of adbc.OptionValueIngestMode*. Empty means the
+	// ADBC default, which is "create" (create the table, then append).
+	ingestMode      string
+	ingestTemporary bool
+	bound           arrow.Record
+	boundStream     array.RecordReader
 }
 
 func (s *statementImpl) Close() error {
@@ -244,6 +248,26 @@ func (s *statementImpl) SetOption(key, value string) error {
 		s.targetTable = value
 	case adbc.OptionValueIngestTargetDBSchema:
 		s.targetSchema = value
+	case adbc.OptionKeyIngestMode:
+		switch value {
+		case adbc.OptionValueIngestModeCreate,
+			adbc.OptionValueIngestModeAppend,
+			adbc.OptionValueIngestModeReplace,
+			adbc.OptionValueIngestModeCreateAppend:
+			s.ingestMode = value
+		default:
+			return errStatus(adbc.StatusInvalidArgument, "unknown ingest mode %q", value)
+		}
+	case adbc.OptionValueIngestTemporary:
+		switch value {
+		case adbc.OptionValueEnabled:
+			s.ingestTemporary = true
+		case adbc.OptionValueDisabled:
+			s.ingestTemporary = false
+		default:
+			return errStatus(adbc.StatusInvalidArgument, "invalid value %q for %s (want %q or %q)",
+				value, key, adbc.OptionValueEnabled, adbc.OptionValueDisabled)
+		}
 	}
 	return nil
 }

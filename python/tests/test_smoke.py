@@ -74,7 +74,11 @@ def test_readme_streaming_large_result_set(quack_server):
 
 
 def test_readme_bulk_ingest(quack_server):
-    """README "Bulk ingest (Arrow → DuckDB)" — adbc_ingest example."""
+    """README "Bulk ingest (Arrow → DuckDB)" — adbc_ingest example.
+
+    Mirrors the README snippet exactly: create_append mode, no manual
+    CREATE TABLE — the driver builds the table from the Arrow schema.
+    """
     import adbc_driver_quack.dbapi as quack
 
     with quack.connect(
@@ -82,15 +86,86 @@ def test_readme_bulk_ingest(quack_server):
         db_kwargs=quack_server.db_kwargs,
     ) as conn, conn.cursor() as cur:
         cur.execute("DROP TABLE IF EXISTS customers")
-        cur.execute("CREATE TABLE customers (id INTEGER, name VARCHAR)")
         try:
             table = pa.table({"id": [1, 2, 3], "name": ["alice", "bob", "carol"]})
-            cur.adbc_ingest(table_name="customers", data=table, mode="append")
+            cur.adbc_ingest(table_name="customers", data=table, mode="create_append")
             cur.execute("SELECT COUNT(*) AS n FROM customers")
             row = cur.fetch_arrow_table().to_pylist()[0]
             assert row["n"] == 3
         finally:
             cur.execute("DROP TABLE customers")
+
+
+def test_bulk_ingest_mode_create(quack_server):
+    """mode='create' (the default) builds the table from the Arrow schema,
+    then errors if asked to create the same table again."""
+    with _connect(quack_server) as conn, conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS adbc_it_mode_create")
+        try:
+            table = pa.table({"id": pa.array([1, 2], type=pa.int32()), "name": ["a", "b"]})
+            # No mode arg → ADBC default is "create".
+            cur.adbc_ingest("adbc_it_mode_create", table)
+            cur.execute("SELECT COUNT(*) AS n FROM adbc_it_mode_create")
+            assert cur.fetch_arrow_table().to_pylist()[0]["n"] == 2
+
+            # Re-creating an existing table must fail.
+            with pytest.raises(Exception):
+                cur.adbc_ingest("adbc_it_mode_create", table, mode="create")
+        finally:
+            cur.execute("DROP TABLE IF EXISTS adbc_it_mode_create")
+
+
+def test_bulk_ingest_mode_append_requires_existing_table(quack_server):
+    """mode='append' performs no DDL — appending to a missing table errors."""
+    with _connect(quack_server) as conn, conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS adbc_it_mode_append")
+        table = pa.table({"id": pa.array([1], type=pa.int32())})
+        with pytest.raises(Exception):
+            cur.adbc_ingest("adbc_it_mode_append", table, mode="append")
+
+        cur.execute("CREATE TABLE adbc_it_mode_append (id INTEGER)")
+        try:
+            cur.adbc_ingest("adbc_it_mode_append", table, mode="append")
+            cur.adbc_ingest("adbc_it_mode_append", table, mode="append")
+            cur.execute("SELECT COUNT(*) AS n FROM adbc_it_mode_append")
+            assert cur.fetch_arrow_table().to_pylist()[0]["n"] == 2
+        finally:
+            cur.execute("DROP TABLE IF EXISTS adbc_it_mode_append")
+
+
+def test_bulk_ingest_mode_replace(quack_server):
+    """mode='replace' drops + recreates the table — old rows and the old
+    schema are gone, replaced by the incoming Arrow schema."""
+    with _connect(quack_server) as conn, conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS adbc_it_mode_replace")
+        try:
+            first = pa.table({"id": pa.array([1, 2, 3], type=pa.int32())})
+            cur.adbc_ingest("adbc_it_mode_replace", first, mode="create")
+
+            # Replace with a different schema + different rows.
+            second = pa.table({"label": ["x"]})
+            cur.adbc_ingest("adbc_it_mode_replace", second, mode="replace")
+
+            cur.execute("SELECT * FROM adbc_it_mode_replace")
+            out = cur.fetch_arrow_table()
+            assert out.column_names == ["label"]
+            assert out.to_pylist() == [{"label": "x"}]
+        finally:
+            cur.execute("DROP TABLE IF EXISTS adbc_it_mode_replace")
+
+
+def test_bulk_ingest_mode_create_append(quack_server):
+    """mode='create_append' creates on first call, appends on the next."""
+    with _connect(quack_server) as conn, conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS adbc_it_mode_ca")
+        try:
+            table = pa.table({"id": pa.array([42], type=pa.int64())})
+            cur.adbc_ingest("adbc_it_mode_ca", table, mode="create_append")
+            cur.adbc_ingest("adbc_it_mode_ca", table, mode="create_append")
+            cur.execute("SELECT COUNT(*) AS n FROM adbc_it_mode_ca")
+            assert cur.fetch_arrow_table().to_pylist()[0]["n"] == 2
+        finally:
+            cur.execute("DROP TABLE IF EXISTS adbc_it_mode_ca")
 
 
 def test_readme_transactions(quack_server):
@@ -127,6 +202,36 @@ def test_readme_transactions(quack_server):
         assert cur.fetch_arrow_table().to_pylist()[0]["n"] == 1
         cur.execute("DROP TABLE order_items")
         cur.execute("DROP TABLE orders")
+
+
+def test_bulk_ingest_in_transaction(quack_server):
+    """Bulk ingest participates in the connection's transaction: with
+    autocommit off, ingested rows roll back and only survive on commit."""
+    import adbc_driver_quack.dbapi
+
+    with _connect(quack_server) as conn, conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS adbc_it_ingest_tx")
+        cur.execute("CREATE TABLE adbc_it_ingest_tx (id INTEGER)")
+
+    with adbc_driver_quack.dbapi.connect(
+        quack_server.uri, db_kwargs=quack_server.db_kwargs, autocommit=False
+    ) as conn, conn.cursor() as cur:
+        table = pa.table({"id": pa.array([1, 2, 3], type=pa.int32())})
+
+        # Ingest then roll back — rows must vanish.
+        cur.adbc_ingest("adbc_it_ingest_tx", table, mode="append")
+        conn.rollback()
+        cur.execute("SELECT COUNT(*) AS n FROM adbc_it_ingest_tx")
+        assert cur.fetch_arrow_table().to_pylist()[0]["n"] == 0
+
+        # Ingest then commit — rows must persist.
+        cur.adbc_ingest("adbc_it_ingest_tx", table, mode="append")
+        conn.commit()
+
+    with _connect(quack_server) as conn, conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM adbc_it_ingest_tx")
+        assert cur.fetch_arrow_table().to_pylist()[0]["n"] == 3
+        cur.execute("DROP TABLE adbc_it_ingest_tx")
 
 
 def test_connect_and_select(quack_server):

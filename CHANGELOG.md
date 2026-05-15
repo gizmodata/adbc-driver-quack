@@ -6,6 +6,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.5] — 2026-05-15
+
+### Added — Bulk-ingest modes
+
+- All four standard ADBC ingest modes now work, not just `append`:
+  `create` (the default), `append`, `replace`, and `create_append`.
+  Previously the `adbc.ingest.mode` option was silently ignored and
+  every mode collapsed to append-only behavior, so any mode that
+  needed table DDL failed against a non-existent table.
+- Table DDL for the create-family modes is generated from the bound
+  Arrow schema (`CREATE TABLE` / `CREATE OR REPLACE TABLE` /
+  `CREATE TABLE IF NOT EXISTS`), mirroring DuckDB's own ADBC driver.
+  `create` against an existing table now returns `ALREADY_EXISTS`.
+- `adbc.ingest.temporary` is honored (`CREATE TEMPORARY TABLE`).
+- Bulk ingest participates in the connection's transaction: with
+  autocommit off, ingested rows roll back / commit with the txn.
+- Regression coverage: hermetic Go DDL/option tests
+  (`driver/quack/bulk_ingest_test.go`) plus per-mode and in-transaction
+  end-to-end Python tests mirroring the README.
+
 ## [0.1.0-alpha.4] — 2026-05-14
 
 README-only release. Switches the quickstart from `127.0.0.1` to

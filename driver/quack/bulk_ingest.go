@@ -2,7 +2,9 @@ package quack
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/apache/arrow-adbc/go/adbc"
 	"github.com/apache/arrow-go/v18/arrow"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/gizmodata/adbc-driver-quack/internal/message"
 	"github.com/gizmodata/adbc-driver-quack/internal/quacktype"
+	"github.com/gizmodata/adbc-driver-quack/internal/transport"
 )
 
 // Bulk-ingest state lives on statementImpl. ADBC's standard pattern is:
@@ -61,6 +64,18 @@ func (s *statementImpl) executeIngest(ctx context.Context) (int64, error) {
 	}
 	defer s.clearBound()
 
+	// The bound schema is needed up front for the CREATE-family modes so
+	// the table DDL is built before the first APPEND_REQUEST.
+	var ddlSchema *arrow.Schema
+	if s.bound != nil {
+		ddlSchema = s.bound.Schema()
+	} else {
+		ddlSchema = s.boundStream.Schema()
+	}
+	if err := s.prepareIngestTarget(ctx, ddlSchema); err != nil {
+		return -1, err
+	}
+
 	var total int64
 	pump := func(rec arrow.Record) error {
 		chunk, err := chunkFromRecord(rec)
@@ -90,6 +105,141 @@ func (s *statementImpl) executeIngest(ctx context.Context) (int64, error) {
 		}
 	}
 	return total, nil
+}
+
+// prepareIngestTarget runs the table DDL (if any) implied by the ingest
+// mode before the append loop, mirroring DuckDB's own ADBC driver:
+//
+//	create        → CREATE TABLE              (error if it exists)
+//	append        → no DDL                    (append fails if missing)
+//	replace       → CREATE OR REPLACE TABLE   (drop + recreate)
+//	create_append → CREATE TABLE IF NOT EXISTS (create only if missing)
+//
+// The ADBC default when no mode is set is "create".
+func (s *statementImpl) prepareIngestTarget(ctx context.Context, schema *arrow.Schema) error {
+	mode := s.ingestMode
+	if mode == "" {
+		mode = adbc.OptionValueIngestModeCreate
+	}
+	if mode == adbc.OptionValueIngestModeAppend {
+		return nil
+	}
+	ddl, err := buildCreateTableSQL(
+		s.targetSchema, s.targetTable, schema,
+		mode == adbc.OptionValueIngestModeCreateAppend, // IF NOT EXISTS
+		mode == adbc.OptionValueIngestModeReplace,      // OR REPLACE
+		s.ingestTemporary,
+	)
+	if err != nil {
+		return errStatus(adbc.StatusInvalidArgument, "ingest: %v", err)
+	}
+	if _, err := s.conn.sess.drainPrepared(ctx, ddl); err != nil {
+		// "create" against an existing table is ALREADY_EXISTS per the
+		// ADBC contract; every other DDL failure is reported as-is.
+		if mode == adbc.OptionValueIngestModeCreate {
+			var se *transport.ErrServerError
+			if errors.As(err, &se) && strings.Contains(strings.ToLower(se.Message), "already exists") {
+				return adbc.Error{Code: adbc.StatusAlreadyExists, Msg: se.Message}
+			}
+		}
+		return fromTransportError(err)
+	}
+	return nil
+}
+
+// buildCreateTableSQL renders a DuckDB CREATE TABLE statement from an
+// Arrow schema. orReplace and ifNotExists are mutually exclusive (the
+// ingest modes never set both); DuckDB rejects the combination anyway.
+func buildCreateTableSQL(schema, table string, s *arrow.Schema, ifNotExists, orReplace, temporary bool) (string, error) {
+	if table == "" {
+		return "", fmt.Errorf("no target table set")
+	}
+	var b strings.Builder
+	b.WriteString("CREATE ")
+	if orReplace {
+		b.WriteString("OR REPLACE ")
+	}
+	if temporary {
+		b.WriteString("TEMPORARY ")
+	}
+	b.WriteString("TABLE ")
+	if ifNotExists {
+		b.WriteString("IF NOT EXISTS ")
+	}
+	if schema != "" {
+		b.WriteString(quoteIdent(schema))
+		b.WriteByte('.')
+	}
+	b.WriteString(quoteIdent(table))
+	b.WriteString(" (")
+	for i, f := range s.Fields() {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		colType, err := duckDBTypeForArrow(f.Type)
+		if err != nil {
+			return "", fmt.Errorf("column %q: %w", f.Name, err)
+		}
+		b.WriteString(quoteIdent(f.Name))
+		b.WriteByte(' ')
+		b.WriteString(colType)
+		if !f.Nullable {
+			b.WriteString(" NOT NULL")
+		}
+	}
+	b.WriteString(")")
+	return b.String(), nil
+}
+
+// quoteIdent double-quotes a SQL identifier, escaping embedded quotes so
+// table/column names with spaces, keywords, or quotes are handled safely.
+func quoteIdent(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+// duckDBTypeForArrow is the SQL-type printer for CREATE TABLE DDL. It
+// covers exactly the Arrow types logicalTypeForArrow accepts on the
+// encoder side, so a creatable schema is always an ingestable one.
+func duckDBTypeForArrow(dt arrow.DataType) (string, error) {
+	switch dt.ID() {
+	case arrow.BOOL:
+		return "BOOLEAN", nil
+	case arrow.INT8:
+		return "TINYINT", nil
+	case arrow.INT16:
+		return "SMALLINT", nil
+	case arrow.INT32:
+		return "INTEGER", nil
+	case arrow.INT64:
+		return "BIGINT", nil
+	case arrow.UINT8:
+		return "UTINYINT", nil
+	case arrow.UINT16:
+		return "USMALLINT", nil
+	case arrow.UINT32:
+		return "UINTEGER", nil
+	case arrow.UINT64:
+		return "UBIGINT", nil
+	case arrow.FLOAT32:
+		return "FLOAT", nil
+	case arrow.FLOAT64:
+		return "DOUBLE", nil
+	case arrow.STRING, arrow.LARGE_STRING:
+		return "VARCHAR", nil
+	case arrow.BINARY, arrow.LARGE_BINARY:
+		return "BLOB", nil
+	case arrow.DATE32:
+		return "DATE", nil
+	case arrow.TIMESTAMP:
+		if dt.(*arrow.TimestampType).TimeZone != "" {
+			return "TIMESTAMP WITH TIME ZONE", nil
+		}
+		return "TIMESTAMP", nil
+	case arrow.DECIMAL128:
+		d := dt.(*arrow.Decimal128Type)
+		return fmt.Sprintf("DECIMAL(%d, %d)", d.Precision, d.Scale), nil
+	}
+	return "", fmt.Errorf("unsupported arrow type %s for ingest", dt)
 }
 
 // chunkFromRecord converts an arrow.Record into a Quack DataChunk.
