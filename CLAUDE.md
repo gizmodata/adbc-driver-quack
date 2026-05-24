@@ -51,8 +51,8 @@ Pinned in CHANGELOG `[Unreleased]` and tracked in the task list. Roughly:
 
 ## Conventions
 
-- **Go 1.23 floor.** Use generics where they help; avoid `any` when a
-  concrete type fits.
+- **Go 1.25 floor** (per `go.mod`). Use generics where they help;
+  avoid `any` when a concrete type fits.
 - **No `panic` across the cgo boundary.** Mirror flightsql's
   `globalPoison` + `defer/recover` from the start.
 - **Apache Arrow Go pin: v18.** Match upstream flightsql and the ADBC

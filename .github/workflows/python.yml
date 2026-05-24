@@ -34,7 +34,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.23'
+          go-version: '1.25'
           cache: false
 
       - name: go vet
@@ -63,7 +63,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.23'
+          go-version: '1.25'
           cache: false
 
       - uses: actions/setup-python@v6
@@ -112,7 +112,7 @@ jobs:
         # (Use 3.12 specifically because that's the version the wheel
         # job below uses.)
         if: matrix.python == '3.12'
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: libadbc_driver_quack-${{ runner.os }}
           path: pkg/quack/libadbc_driver_quack.*
@@ -120,7 +120,7 @@ jobs:
 
       - name: Upload test logs on failure
         if: failure()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: pytest-${{ matrix.os }}-${{ matrix.python }}
           path: |
@@ -169,7 +169,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.23'
+          go-version: '1.25'
           cache: false
 
       - uses: actions/setup-python@v6
@@ -227,7 +227,7 @@ jobs:
             --override-ini='markers=integration: integration tests' .
 
       - name: Upload wheel artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: wheel-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/*.whl
@@ -245,7 +245,7 @@ jobs:
           fi
 
       - name: Upload c-shared library artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: libadbc_driver_quack-release-${{ matrix.goos }}-${{ matrix.goarch }}
           path: release-artifacts/*
@@ -261,7 +261,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
 
@@ -288,7 +288,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
 
