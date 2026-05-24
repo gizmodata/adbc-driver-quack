@@ -335,7 +335,6 @@ jobs:
             release-bundle/SHA256SUMS
           generate_release_notes: true
           draft: false
-          prerelease: ${{ contains(github.ref, '-alpha') || contains(github.ref, '-beta') || contains(github.ref, '-rc') }}
 
   pkgsite-warm:
     name: Warm pkg.go.dev cache
