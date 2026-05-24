@@ -30,12 +30,12 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.23'
-          cache: true
+          cache: false
 
       - name: go vet
         run: go vet ./...
@@ -59,14 +59,14 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.23'
-          cache: true
+          cache: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
 
@@ -112,7 +112,7 @@ jobs:
         # (Use 3.12 specifically because that's the version the wheel
         # job below uses.)
         if: matrix.python == '3.12'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: libadbc_driver_quack-${{ runner.os }}
           path: pkg/quack/libadbc_driver_quack.*
@@ -120,7 +120,7 @@ jobs:
 
       - name: Upload test logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: pytest-${{ matrix.os }}-${{ matrix.python }}
           path: |
@@ -165,14 +165,14 @@ jobs:
             goarch: amd64
             ext: dll
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.23'
-          cache: true
+          cache: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -216,7 +216,7 @@ jobs:
           "$VPY" -m pip install --upgrade pip --quiet
           WHEEL=$(ls dist/*.whl | head -1)
           echo "Installing $WHEEL plus test dependencies"
-          "$VPY" -m pip install "$WHEEL" pytest "duckdb>=1.5.2" pandas --quiet
+          "$VPY" -m pip install "$WHEEL" pytest "duckdb>=1.5.3" pandas --quiet
           # Run tests from a copy outside the source tree so the package
           # has to resolve via the wheel install, not the source dir.
           TESTS="${RUNNER_TEMP}/wheel-smoke-tests"
@@ -227,7 +227,7 @@ jobs:
             --override-ini='markers=integration: integration tests' .
 
       - name: Upload wheel artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: wheel-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/*.whl
@@ -245,7 +245,7 @@ jobs:
           fi
 
       - name: Upload c-shared library artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: libadbc_driver_quack-release-${{ matrix.goos }}-${{ matrix.goarch }}
           path: release-artifacts/*
@@ -261,7 +261,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           path: artifacts
 
@@ -286,9 +286,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           path: artifacts
 
