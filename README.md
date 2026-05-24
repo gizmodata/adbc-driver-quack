@@ -25,11 +25,12 @@ Distributed as:
 
 ## Quickstart
 
-### 1. Start a Quack server (any DuckDB v1.5.2+)
+### 1. Start a Quack server (any DuckDB v1.5.3+)
 
 ```sql
--- in any DuckDB session, with the unsigned extensions flag enabled (`duckdb -unsigned`)
-INSTALL quack FROM core_nightly;
+-- in any DuckDB session — Quack is a core extension as of v1.5.3,
+-- so no `core_nightly` repository or `-unsigned` flag is needed.
+INSTALL quack;
 LOAD quack;
 CALL quack_serve('quack:localhost:9494', token=>'my-secret-token');
 ```

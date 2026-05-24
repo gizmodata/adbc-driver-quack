@@ -6,6 +6,31 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.7] — 2026-05-24
+
+### Changed — Quack is now a core DuckDB extension (v1.5.3+)
+
+- DuckDB v1.5.3 (announced 2026-05-20) ships `quack` as a **core**
+  extension. No more `core_nightly` repository and no more
+  `-unsigned` / `allow_unsigned_extensions` requirement — `INSTALL
+  quack; LOAD quack;` Just Works against any DuckDB v1.5.3+ session.
+  README quickstart and the Python integration-test `conftest.py`
+  are updated accordingly.
+- Bumped the `test` extra to require `duckdb >=1.5.3` (was
+  `>=1.5.2`).
+- Verified protocol compatibility: the full Python integration suite
+  (26 tests) passes against DuckDB 1.5.3 with no driver-side
+  changes.
+
+### CI — GitHub Release body now pulled from CHANGELOG
+
+- The `github-release` job now checks out the repo, extracts the
+  matching `## [VERSION]` section from `CHANGELOG.md` (same awk
+  pattern as `gizmodata/gizmosql`), and passes it to
+  `softprops/action-gh-release` via `body_path`.
+  `generate_release_notes: true` is kept as a fallback for tags
+  whose CHANGELOG section is missing.
+
 ## [0.1.0-alpha.6] — 2026-05-15
 
 ### Fixed — README bulk-ingest example silently lost data

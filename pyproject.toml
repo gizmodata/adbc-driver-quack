@@ -46,7 +46,7 @@ classifiers = [
 
 [project.optional-dependencies]
 dbapi = ["pandas"]
-test = ["pandas", "pytest >=7", "duckdb >=1.5.2"]
+test = ["pandas", "pytest >=7", "duckdb >=1.5.3"]
 
 [project.urls]
 homepage = "https://github.com/gizmodata/adbc-driver-quack"

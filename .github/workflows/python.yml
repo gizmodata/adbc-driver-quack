@@ -286,9 +286,34 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      - name: Extract release notes from CHANGELOG.md
+        id: changelog
+        run: |
+          # Strip the leading 'v' from the tag (refs/tags/v1.2.3 -> 1.2.3)
+          # and pull the matching "## [VERSION] ..." section out of
+          # CHANGELOG.md (stop at the next "## [" heading). Save to
+          # release_notes.md; fall back to an empty file so the release
+          # still gets created with auto-generated notes.
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Extracting release notes for version: ${VERSION}"
+          awk -v ver="${VERSION}" '
+            $0 ~ "^## \\[" ver "\\]" { found=1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > release_notes.md
+
+          if [ -s release_notes.md ]; then
+            echo "---- release_notes.md ----"
+            cat release_notes.md
+          else
+            echo "WARNING: no matching CHANGELOG section for ${VERSION}; release will use auto-generated notes."
+          fi
 
       - name: Stage c-shared library bundle
         run: |
@@ -304,6 +329,7 @@ jobs:
       - name: Attach to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: release_notes.md
           files: |
             release-bundle/libadbc_driver_quack-*
             release-bundle/SHA256SUMS

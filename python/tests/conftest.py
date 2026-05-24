@@ -1,12 +1,13 @@
 """
 pytest fixtures for the adbc-driver-quack integration tests.
 
-Spins up an in-process DuckDB via the ``duckdb`` Python package,
-installs the ``quack`` extension from ``core_nightly``, and calls
-``quack_serve`` on a randomly-chosen free port. The Quack listener
-runs in a background thread inside DuckDB; the test client connects
-to ``quack://127.0.0.1:<port>`` exactly as it would against a
-real deployed server.
+Spins up an in-process DuckDB via the ``duckdb`` Python package
+(v1.5.3+, where ``quack`` is a core extension — no ``core_nightly``
+repo or ``allow_unsigned_extensions`` needed), installs and loads
+``quack``, and calls ``quack_serve`` on a randomly-chosen free
+port. The Quack listener runs in a background thread inside
+DuckDB; the test client connects to ``quack://127.0.0.1:<port>``
+exactly as it would against a real deployed server.
 
 Tests are auto-skipped when the ``duckdb`` Python package is not
 installed (so ``pytest -m 'not integration'`` still runs cleanly).
@@ -57,15 +58,13 @@ def quack_server() -> QuackServer:
     port = _pick_free_port()
     token = "adbc-driver-quack-it-token"
 
-    # In-process DuckDB with unsigned-extensions enabled so we can load
-    # the quack extension from core_nightly. The connection stays alive
-    # for the whole pytest session — closing it stops the Quack listener.
-    con = duckdb.connect(
-        database=":memory:",
-        config={"allow_unsigned_extensions": "true"},
-    )
+    # In-process DuckDB v1.5.3+ ships quack as a core extension, so no
+    # `core_nightly` repository or `allow_unsigned_extensions` is
+    # required. The connection stays alive for the whole pytest
+    # session — closing it stops the Quack listener.
+    con = duckdb.connect(database=":memory:")
     try:
-        con.execute(query="INSTALL quack FROM core_nightly")
+        con.execute(query="INSTALL quack")
         con.execute(query="LOAD quack")
         con.execute(
             query=f"CALL quack_serve('quack:127.0.0.1:{port}', token=>'{token}')"
