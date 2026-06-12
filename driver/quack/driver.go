@@ -18,10 +18,20 @@ import (
 // ADBC option keys used by the Quack driver. They follow the
 // `adbc.<vendor>.<noun>` convention used by adbc-driver-flightsql.
 const (
-	OptionURI         = adbc.OptionKeyURI // "adbc.uri" — the quack:// connection URL
-	OptionToken       = "adbc.quack.token"
-	OptionTLS         = "adbc.quack.tls"
-	OptionIngestTable = adbc.OptionKeyIngestTargetTable
+	OptionURI   = adbc.OptionKeyURI // "adbc.uri" — the quack:// connection URL
+	OptionToken = "adbc.quack.token"
+	// OptionTokenEnv / OptionTokenFile name an environment variable /
+	// local file to read the token from. Accepted only as ADBC options,
+	// never as URL query parameters (a shared URL must not be able to
+	// exfiltrate a local secret to the host it names).
+	OptionTokenEnv  = "adbc.quack.token_env"
+	OptionTokenFile = "adbc.quack.token_file"
+	OptionTLS       = "adbc.quack.tls"
+	// HTTP timeouts: plain digits are seconds, anything else is parsed
+	// as a Go duration (e.g. "1.5s").
+	OptionConnectTimeout = "adbc.quack.rpc.timeout_seconds.connect"
+	OptionRequestTimeout = "adbc.quack.rpc.timeout_seconds.request"
+	OptionIngestTable    = adbc.OptionKeyIngestTargetTable
 )
 
 // NewDriver returns a quack ADBC driver.
@@ -127,38 +137,40 @@ func (c *connectionImpl) GetTableTypes(ctx context.Context) (array.RecordReader,
 	return c.getTableTypesImpl(ctx)
 }
 
-// Commit ends the current manual transaction (if any) with COMMIT and
-// then re-opens a fresh BEGIN if autocommit is still off, so the next
-// statement runs inside a new transaction.
+// Commit ends the current manual transaction (if any) with COMMIT.
+// The next statement executed with autocommit still off lazily opens a
+// fresh transaction via beginTxIfNeeded, so the server never holds an
+// idle transaction open between statements.
 func (c *connectionImpl) Commit(ctx context.Context) error {
 	if c.autoCommit {
 		return errStatus(adbc.StatusInvalidState, "Commit called while autocommit is enabled")
 	}
 	if !c.txOpen {
-		// No outstanding transaction — nothing to commit. Be lenient.
-		return c.beginTx(ctx)
+		// No statement has run since the last COMMIT/ROLLBACK, so the
+		// server has no transaction to commit. Be lenient.
+		return nil
 	}
 	if err := c.execNoResult(ctx, "COMMIT"); err != nil {
 		return fromTransportError(err)
 	}
 	c.txOpen = false
-	return c.beginTx(ctx)
+	return nil
 }
 
-// Rollback aborts the current manual transaction (if any) and re-opens
-// a fresh BEGIN so the next statement still runs inside a transaction.
+// Rollback aborts the current manual transaction (if any). As with
+// Commit, the next statement re-opens a transaction lazily.
 func (c *connectionImpl) Rollback(ctx context.Context) error {
 	if c.autoCommit {
 		return errStatus(adbc.StatusInvalidState, "Rollback called while autocommit is enabled")
 	}
 	if !c.txOpen {
-		return c.beginTx(ctx)
+		return nil
 	}
 	if err := c.execNoResult(ctx, "ROLLBACK"); err != nil {
 		return fromTransportError(err)
 	}
 	c.txOpen = false
-	return c.beginTx(ctx)
+	return nil
 }
 
 // SetOption handles connection-level options. Only autocommit toggling
@@ -184,8 +196,11 @@ func (c *connectionImpl) SetOption(key, value string) error {
 			if !c.autoCommit {
 				return nil
 			}
+			// The server-side BEGIN is deferred until the first statement
+			// actually executes (beginTxIfNeeded), so a connection that
+			// merely disabled autocommit doesn't pin an idle transaction.
 			c.autoCommit = false
-			return c.beginTx(context.Background())
+			return nil
 		default:
 			return errStatus(adbc.StatusInvalidArgument,
 				"unknown value %q for %s; expected %q or %q",
@@ -199,10 +214,13 @@ func (c *connectionImpl) ReadPartition(context.Context, []byte) (array.RecordRea
 	return nil, errStatus(adbc.StatusNotImplemented, "ReadPartition")
 }
 
-// beginTx issues BEGIN TRANSACTION. Idempotent: if a tx is already open
-// we silently do nothing.
-func (c *connectionImpl) beginTx(ctx context.Context) error {
-	if c.txOpen {
+// beginTxIfNeeded lazily opens a server-side transaction before the
+// first statement executed in manual-commit mode. The server stays in
+// auto-commit until a statement actually runs, so Commit with nothing
+// pending is a harmless no-op instead of a server error ("cannot
+// commit - no transaction is active").
+func (c *connectionImpl) beginTxIfNeeded(ctx context.Context) error {
+	if c.autoCommit || c.txOpen {
 		return nil
 	}
 	if err := c.execNoResult(ctx, "BEGIN TRANSACTION"); err != nil {
@@ -280,6 +298,9 @@ func (s *statementImpl) ExecuteQuery(ctx context.Context) (array.RecordReader, i
 	if s.sql == "" {
 		return nil, -1, errStatus(adbc.StatusInvalidState, "Statement.ExecuteQuery: no SQL set")
 	}
+	if err := s.conn.beginTxIfNeeded(ctx); err != nil {
+		return nil, -1, err
+	}
 	cur, err := s.conn.sess.cursor(ctx, s.sql)
 	if err != nil {
 		return nil, -1, fromTransportError(err)
@@ -295,6 +316,9 @@ func (s *statementImpl) ExecuteQuery(ctx context.Context) (array.RecordReader, i
 }
 
 func (s *statementImpl) ExecuteUpdate(ctx context.Context) (int64, error) {
+	if err := s.conn.beginTxIfNeeded(ctx); err != nil {
+		return -1, err
+	}
 	// Bulk-ingest path: when a target table is set and there's bound data,
 	// route to executeIngest instead of running a SQL update.
 	if s.targetTable != "" && (s.bound != nil || s.boundStream != nil) {

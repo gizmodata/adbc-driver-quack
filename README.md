@@ -193,11 +193,22 @@ with quack.connect(
 quack://host[:port]
 ```
 
-| Option              | Default | Notes                                                                    |
-|---------------------|---------|--------------------------------------------------------------------------|
-| `adbc.uri`          | —       | Required. Pass as the `uri=` kwarg to `quack.connect`.                   |
-| `adbc.quack.token`  | (none)  | Authentication token. Server-side `token=>` argument to `quack_serve()`. |
-| `adbc.quack.tls`    | `false` | `true` → use `https://` for the underlying HTTP transport.               |
+| Option                                    | Default | Notes                                                                    |
+|-------------------------------------------|---------|--------------------------------------------------------------------------|
+| `adbc.uri`                                | —       | Required. Pass as the `uri=` kwarg to `quack.connect`.                   |
+| `adbc.quack.token`                        | (none)  | Authentication token. Server-side `token=>` argument to `quack_serve()`. |
+| `adbc.quack.token_env`                    | (none)  | Environment variable to read the token from. Option only — rejected on the URL. |
+| `adbc.quack.token_file`                   | (none)  | Local file to read the token from. Option only — rejected on the URL.    |
+| `adbc.quack.tls`                          | `false` | `true` → use `https://` for the underlying HTTP transport.               |
+| `adbc.quack.rpc.timeout_seconds.connect`  | `10`    | HTTP connect timeout, as seconds or a Go duration like `1.5s`.           |
+| `adbc.quack.rpc.timeout_seconds.request`  | `60`    | Per-request HTTP timeout, as seconds or a Go duration like `90s`.        |
+
+Token precedence matches `quack-jdbc`: an explicit `adbc.quack.token`
+(or `password`) wins, then `adbc.quack.token_env`, then
+`adbc.quack.token_file`. The env/file indirections are accepted only as
+ADBC options, never as `quack://...?tokenEnv=...` URL query parameters —
+a pasted URL must not be able to read a local secret and send it to
+whatever host the URL names.
 
 The URI is its own kwarg; everything else goes through `db_kwargs`:
 

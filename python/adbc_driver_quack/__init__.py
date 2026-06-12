@@ -24,8 +24,22 @@ class DatabaseOptions(enum.Enum):
     #: The authentication token to send during the CONNECTION_REQUEST handshake.
     TOKEN = "adbc.quack.token"
 
+    #: Name of an environment variable to read the token from.
+    #: Accepted only as an option, never as a URL query parameter.
+    TOKEN_ENV = "adbc.quack.token_env"
+
+    #: Path to a local file to read the token from.
+    #: Accepted only as an option, never as a URL query parameter.
+    TOKEN_FILE = "adbc.quack.token_file"
+
     #: Set to "true" to use HTTPS for the underlying transport.
     TLS = "adbc.quack.tls"
+
+    #: HTTP connect timeout: seconds, or a Go duration like "1.5s" (default 10).
+    CONNECT_TIMEOUT = "adbc.quack.rpc.timeout_seconds.connect"
+
+    #: Per-request HTTP timeout: seconds, or a Go duration like "90s" (default 60).
+    REQUEST_TIMEOUT = "adbc.quack.rpc.timeout_seconds.request"
 
 
 class ConnectionOptions(enum.Enum):

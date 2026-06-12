@@ -585,3 +585,74 @@ def test_bad_token_rejected(quack_server):
         adbc_driver_quack.dbapi.connect(
             quack_server.uri, db_kwargs={"adbc.quack.token": "wrong-token"}
         )
+
+
+def test_commit_with_nothing_pending_is_noop(quack_server):
+    """With autocommit off, commit()/rollback() before any statement must
+    be harmless no-ops (the server-side BEGIN is lazy), not the JDBC-era
+    "cannot commit - no transaction is active" server error."""
+    import adbc_driver_quack.dbapi
+
+    with adbc_driver_quack.dbapi.connect(
+        quack_server.uri, db_kwargs=quack_server.db_kwargs, autocommit=False
+    ) as conn:
+        conn.commit()
+        conn.rollback()
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 AS x")
+            assert cur.fetch_arrow_table().to_pylist()[0]["x"] == 1
+        conn.commit()
+
+
+def test_token_env(quack_server):
+    """adbc.quack.token_env reads the auth token from an env var.
+
+    Runs in a subprocess because the Go runtime inside the driver
+    shared library snapshots the process environment when it first
+    loads -- an env var set from Python *after* that (monkeypatch.setenv)
+    is invisible to the Go side. Real usage sets the variable before
+    the process starts, which is exactly what the subprocess models.
+    """
+    import os
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent(
+        f"""
+        import adbc_driver_quack.dbapi
+
+        with adbc_driver_quack.dbapi.connect(
+            {quack_server.uri!r}, db_kwargs={{"adbc.quack.token_env": "QUACK_IT_TOKEN"}}
+        ) as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1 AS x")
+            assert cur.fetch_arrow_table().to_pylist()[0]["x"] == 1
+        """
+    )
+    env = dict(os.environ, QUACK_IT_TOKEN=quack_server.token)
+    result = subprocess.run(
+        [sys.executable, "-c", script], env=env, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_token_file(quack_server, tmp_path):
+    """adbc.quack.token_file reads the auth token from a local file."""
+    import adbc_driver_quack.dbapi
+
+    token_file = tmp_path / "token"
+    token_file.write_text(quack_server.token + "\n")
+    with adbc_driver_quack.dbapi.connect(
+        quack_server.uri, db_kwargs={"adbc.quack.token_file": str(token_file)}
+    ) as conn, conn.cursor() as cur:
+        cur.execute("SELECT 1 AS x")
+        assert cur.fetch_arrow_table().to_pylist()[0]["x"] == 1
+
+
+def test_token_env_rejected_on_url(quack_server):
+    """tokenEnv/tokenFile on the URL must be rejected outright — a pasted
+    URL must not be able to read a local secret."""
+    import adbc_driver_quack.dbapi
+
+    with pytest.raises(Exception, match="ADBC option"):
+        adbc_driver_quack.dbapi.connect(quack_server.uri + "?tokenEnv=SOME_VAR")

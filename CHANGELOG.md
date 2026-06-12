@@ -6,6 +6,42 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — parity with quack-jdbc `0.2.0-alpha.x`
+
+- **HTTPS transport keeps the original hostname** in request URLs
+  instead of replacing it with a resolved IP address, preserving TLS
+  SNI and certificate hostname verification for gateways and load
+  balancers that route by hostname. Plain HTTP endpoints still expand
+  to resolved address candidates for the existing localhost IPv4/IPv6
+  fallback. (Port of quack-jdbc `d942788`.)
+- **Manual-commit transactions now open lazily.** Disabling autocommit
+  no longer issues an immediate `BEGIN TRANSACTION`; the transaction
+  opens just before the first statement actually executes, and
+  `Commit`/`Rollback` with nothing pending are no-ops instead of
+  leaving an idle server-side transaction pinned open between
+  statements. This matters for the Python DBAPI, whose connections
+  default to `autocommit=False`. (Port of quack-jdbc `8c25f6f`.)
+- The documented `adbc.quack.tls` option is now actually honored —
+  previously only the `tls` / `useEncryption` URL query parameters
+  enabled HTTPS and the ADBC option was silently ignored.
+
+### Added
+
+- **Indirect token providers**: `adbc.quack.token_env` (read the token
+  from an environment variable) and `adbc.quack.token_file` (read it
+  from a local file), with the same precedence as quack-jdbc:
+  `token` > `password` > `token_env` > `token_file`. Both are accepted
+  only as ADBC options and rejected as URL query parameters, so a
+  pasted `quack://` URL cannot exfiltrate a local secret. (Port of
+  quack-jdbc `afb8249` + `995279c`.)
+- **Configurable HTTP timeouts**: `adbc.quack.rpc.timeout_seconds.connect`
+  (default 10) and `adbc.quack.rpc.timeout_seconds.request` (default 60),
+  as plain seconds or a Go duration string. The JDBC-style
+  `connectTimeout`/`requestTimeout` URL query parameters are accepted
+  for interop with `jdbc:quack://` URLs. (Port of quack-jdbc `322740d`.)
+- Python `DatabaseOptions` enum gained `TOKEN_ENV`, `TOKEN_FILE`,
+  `CONNECT_TIMEOUT`, and `REQUEST_TIMEOUT`.
+
 ## [0.1.0-alpha.7] — 2026-05-24
 
 ### Changed — Quack is now a core DuckDB extension (v1.5.3+)

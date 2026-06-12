@@ -26,31 +26,44 @@ func (e *ErrServerError) Error() string { return e.Message }
 // HTTPTransport posts framed binary Quack messages to /quack over
 // HTTP(S) and returns the decoded server response.
 //
-// If the URL host is a name that resolves to multiple addresses (e.g.
-// "localhost" → {127.0.0.1, ::1}), each address is tried in order until
-// one accepts the TCP connection. This is the same address-fallback
-// pattern we landed in the JDBC driver after the macOS-IPv6-by-default
-// bug bit us.
+// For plain HTTP, if the URL host is a name that resolves to multiple
+// addresses (e.g. "localhost" → {127.0.0.1, ::1}), each address is
+// tried in order until one accepts the TCP connection. This is the
+// same address-fallback pattern we landed in the JDBC driver after the
+// macOS-IPv6-by-default bug bit us.
+//
+// HTTPS endpoints keep the original hostname as the single candidate:
+// replacing the URL host with a resolved IP address breaks TLS SNI and
+// certificate hostname verification.
 type HTTPTransport struct {
 	uri            QuackURI
 	httpClient     *http.Client
 	requestTimeout time.Duration
 }
 
-// NewHTTPTransport constructs a transport with sensible defaults.
+// NewHTTPTransport constructs a transport using the URI's timeouts
+// (or the package defaults when the URI carries none).
 func NewHTTPTransport(uri QuackURI) *HTTPTransport {
+	connectTimeout := uri.ConnectTimeout
+	if connectTimeout <= 0 {
+		connectTimeout = DefaultConnectTimeout
+	}
+	requestTimeout := uri.RequestTimeout
+	if requestTimeout <= 0 {
+		requestTimeout = DefaultRequestTimeout
+	}
 	return &HTTPTransport{
 		uri: uri,
 		httpClient: &http.Client{
-			Timeout: 60 * time.Second,
+			Timeout: requestTimeout,
 			Transport: &http.Transport{
 				DialContext: (&net.Dialer{
-					Timeout:   10 * time.Second,
+					Timeout:   connectTimeout,
 					KeepAlive: 30 * time.Second,
 				}).DialContext,
 			},
 		},
-		requestTimeout: 60 * time.Second,
+		requestTimeout: requestTimeout,
 	}
 }
 
@@ -66,17 +79,13 @@ func (t *HTTPTransport) Send(ctx context.Context, m message.QuackMessage) (messa
 		return nil, fmt.Errorf("transport: encode message: %w", err)
 	}
 
-	addrs, err := net.LookupIP(t.uri.Host)
+	endpoints, err := t.endpointCandidates()
 	if err != nil {
-		return nil, fmt.Errorf("transport: resolve host %q: %w", t.uri.Host, err)
-	}
-	if len(addrs) == 0 {
-		return nil, fmt.Errorf("transport: no addresses found for %q", t.uri.Host)
+		return nil, err
 	}
 
 	var lastFailure error
-	for i, addr := range addrs {
-		endpoint := t.endpointFor(addr.String())
+	for _, endpoint := range endpoints {
 		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 		if reqErr != nil {
 			return nil, fmt.Errorf("transport: build HTTP request: %w", reqErr)
@@ -107,32 +116,44 @@ func (t *HTTPTransport) Send(ctx context.Context, m message.QuackMessage) (messa
 		if err, ok := decoded.(message.ErrorResponse); ok {
 			return nil, &ErrServerError{Message: err.Message}
 		}
-		_ = i
 		return decoded, nil
 	}
 
-	addrsList := make([]string, 0, len(addrs))
-	for _, a := range addrs {
-		addrsList = append(addrsList, a.String())
-	}
-	detail := "no addresses connected"
+	detail := "no endpoints connected"
 	if lastFailure != nil {
 		detail = lastFailure.Error()
 	}
 	return nil, fmt.Errorf("transport: HTTP connect failed for %s:%d (tried %s): %s",
-		t.uri.Host, t.uri.Port, strings.Join(addrsList, ", "), detail)
+		t.uri.Host, t.uri.Port, strings.Join(endpoints, ", "), detail)
+}
+
+// endpointCandidates returns the endpoint URLs to attempt, in order.
+// HTTPS keeps the hostname (one candidate, preserving SNI/cert
+// verification); plain HTTP expands to every resolved address.
+func (t *HTTPTransport) endpointCandidates() ([]string, error) {
+	if t.uri.TLS {
+		return []string{t.uri.HTTPURL()}, nil
+	}
+	addrs, err := net.LookupIP(t.uri.Host)
+	if err != nil {
+		return nil, fmt.Errorf("transport: resolve host %q: %w", t.uri.Host, err)
+	}
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("transport: no addresses found for %q", t.uri.Host)
+	}
+	endpoints := make([]string, 0, len(addrs))
+	for _, addr := range addrs {
+		endpoints = append(endpoints, t.endpointFor(addr.String()))
+	}
+	return endpoints, nil
 }
 
 func (t *HTTPTransport) endpointFor(addr string) string {
-	scheme := "http"
-	if t.uri.TLS {
-		scheme = "https"
-	}
 	host := addr
 	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
 		host = "[" + host + "]"
 	}
-	return fmt.Sprintf("%s://%s:%d%s", scheme, host, t.uri.Port, codec.QuackEndpoint)
+	return fmt.Sprintf("http://%s:%d%s", host, t.uri.Port, codec.QuackEndpoint)
 }
 
 // isFallthroughErr reports whether a Send failure is connection-level
