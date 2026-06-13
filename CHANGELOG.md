@@ -6,6 +6,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.8] — 2026-06-12
+
 ### Fixed — parity with quack-jdbc `0.2.0-alpha.x`
 
 - **HTTPS transport keeps the original hostname** in request URLs
