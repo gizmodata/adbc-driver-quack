@@ -41,6 +41,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   quack extension: wire protocol unchanged (QUACK_VERSION 1); the
   server floor stays v1.5.3 and the `duckdb >=1.5.3` test dependency
   resolves to 1.5.5 automatically.
+- CI: releases now ship a **windows/arm64 c-shared driver DLL** (built
+  natively on `windows-11-arm` with llvm-mingw) for Go/C/driver-manifest
+  consumers. A win_arm64 *wheel* is deliberately not published yet:
+  `pyarrow` and `adbc-driver-manager` have no win_arm64 wheels on PyPI,
+  so ours could never pip-install there — flip the matrix `dll_only`
+  flag once upstream ships them.
+- CI: silenced Homebrew tap-trust warnings on macOS runners by
+  untapping the runner image's pre-installed `aws/tap`.
 
 - Bumped `github.com/apache/arrow-go/v18` v18.6.0 → v18.7.0 and
   refreshed indirect Go module dependencies (otel v1.44.0, klauspost

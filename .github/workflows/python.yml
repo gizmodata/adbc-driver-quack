@@ -72,7 +72,13 @@ jobs:
 
       - name: Install clang-format (macOS)
         if: matrix.os == 'macos-latest'
-        run: brew install clang-format
+        # The runner image ships with aws/tap pre-tapped, which trips
+        # Homebrew's tap-trust warning on every brew command. We don't
+        # use anything from it — untap it first (with the trust check
+        # suppressed for that one command so the untap itself is quiet).
+        run: |
+          HOMEBREW_NO_REQUIRE_TAP_TRUST=1 brew untap aws/tap 2>/dev/null || true
+          brew install clang-format
 
       - name: Install goimports + clang-format (Linux)
         if: matrix.os == 'ubuntu-latest'
@@ -166,6 +172,18 @@ jobs:
             goos: windows
             goarch: amd64
             ext: dll
+          # dll_only: pyarrow and adbc-driver-manager publish no
+          # win_arm64 wheels yet, so an adbc-driver-quack wheel could
+          # never pip-install on Windows ARM. Ship the c-shared driver
+          # DLL as a release artifact (Go / C / driver-manifest
+          # consumers) and flip dll_only off once upstream wheels exist.
+          - os: windows
+            arch: arm64
+            runner: windows-11-arm
+            goos: windows
+            goarch: arm64
+            ext: dll
+            dll_only: true
     steps:
       - uses: actions/checkout@v6
 
@@ -175,8 +193,23 @@ jobs:
           cache: false
 
       - uses: actions/setup-python@v6
+        if: ${{ !matrix.dll_only }}
         with:
           python-version: '3.12'
+
+      - name: Install llvm-mingw (cgo C toolchain for windows/arm64)
+        if: ${{ matrix.dll_only }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          url=$(curl -s https://api.github.com/repos/mstorsjo/llvm-mingw/releases/latest \
+            | grep -o 'https://[^"]*ucrt-aarch64\.zip' | head -1)
+          echo "Downloading $url"
+          curl -sL "$url" -o llvm-mingw.zip
+          unzip -q llvm-mingw.zip -d "$RUNNER_TEMP/llvm-mingw"
+          tooldir=$(ls -d "$RUNNER_TEMP"/llvm-mingw/llvm-mingw-*)
+          echo "$tooldir/bin" >> "$GITHUB_PATH"
+          echo "CC=$tooldir/bin/aarch64-w64-mingw32-clang" >> "$GITHUB_ENV"
 
       - name: Build c-shared driver library
         shell: bash
@@ -190,6 +223,7 @@ jobs:
           echo "ADBC_QUACK_LIBRARY=$PWD/pkg/quack/libadbc_driver_quack.${{ matrix.ext }}" >> "$GITHUB_ENV"
 
       - name: Build wheel
+        if: ${{ !matrix.dll_only }}
         shell: bash
         run: |
           python -m pip install --upgrade pip build
@@ -197,6 +231,7 @@ jobs:
           ls -la dist/
 
       - name: Smoke-test wheel in a clean venv
+        if: ${{ !matrix.dll_only }}
         # Install the freshly built wheel into a fresh venv (no source
         # tree on PYTHONPATH) and run the integration suite from a copy
         # of python/tests/ outside the repo. Catches bugs that the
@@ -229,6 +264,7 @@ jobs:
             --override-ini='markers=integration: integration tests' .
 
       - name: Upload wheel artifact
+        if: ${{ !matrix.dll_only }}
         uses: actions/upload-artifact@v7
         with:
           name: wheel-${{ matrix.os }}-${{ matrix.arch }}
