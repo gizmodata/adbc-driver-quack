@@ -39,7 +39,17 @@ type QuackURI struct {
 	ConnectTimeout time.Duration
 	RequestTimeout time.Duration
 	Params         map[string]string
+	// ExtraHeaders are additional HTTP headers sent with every request,
+	// e.g. for proxies or load balancers that require their own auth.
+	// Mirrors duckdb-quack's EXTRA_HTTP_HEADERS secret parameter.
+	ExtraHeaders map[string]string
 }
+
+// HTTPHeaderPrefix is the ADBC option prefix for extra HTTP headers:
+// `adbc.quack.http.header.<Header-Name>`. Accepted only as an ADBC
+// option — never as a URL query parameter, so a pasted URL cannot
+// inject headers into the driver's requests.
+const HTTPHeaderPrefix = "adbc.quack.http.header."
 
 // AcceptsURL reports whether s starts with a recognized Quack URL prefix.
 func AcceptsURL(s string) bool {
@@ -96,7 +106,28 @@ func ParseURI(rawURL string, opts map[string]string) (QuackURI, error) {
 			return QuackURI{}, fmt.Errorf("transport: option %q is only accepted as an ADBC option, not a URL query parameter", key)
 		}
 	}
+	for key := range q.Params {
+		if strings.HasPrefix(key, HTTPHeaderPrefix) {
+			return QuackURI{}, fmt.Errorf("transport: option %q is only accepted as an ADBC option, not a URL query parameter", key)
+		}
+	}
 	for k, v := range opts {
+		if strings.HasPrefix(k, HTTPHeaderPrefix) {
+			name := strings.TrimSpace(k[len(HTTPHeaderPrefix):])
+			if err := validateHeader(name, v); err != nil {
+				return QuackURI{}, err
+			}
+			if q.ExtraHeaders == nil {
+				q.ExtraHeaders = make(map[string]string)
+			}
+			// An empty value clears a header set earlier on the database.
+			if v == "" {
+				delete(q.ExtraHeaders, name)
+			} else {
+				q.ExtraHeaders[name] = v
+			}
+			continue
+		}
 		if v != "" {
 			q.Params[k] = v
 		}
@@ -114,6 +145,23 @@ func ParseURI(rawURL string, opts map[string]string) (QuackURI, error) {
 		return QuackURI{}, err
 	}
 	return q, nil
+}
+
+// validateHeader rejects header names/values that would corrupt the
+// request: empty or whitespace-containing names, control characters in
+// values, and the headers the protocol itself owns.
+func validateHeader(name, value string) error {
+	if name == "" || strings.ContainsAny(name, " \t\r\n:") {
+		return fmt.Errorf("transport: invalid HTTP header name %q", name)
+	}
+	if strings.ContainsAny(value, "\r\n") {
+		return fmt.Errorf("transport: HTTP header %q value must not contain CR/LF", name)
+	}
+	switch strings.ToLower(name) {
+	case "content-type", "accept", "content-length", "host":
+		return fmt.Errorf("transport: HTTP header %q is reserved by the Quack protocol", name)
+	}
+	return nil
 }
 
 // resolveToken resolves the auth token with the same precedence as

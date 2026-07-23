@@ -90,6 +90,12 @@ func (t *HTTPTransport) Send(ctx context.Context, m message.QuackMessage) (messa
 		if reqErr != nil {
 			return nil, fmt.Errorf("transport: build HTTP request: %w", reqErr)
 		}
+		// Extra headers first, protocol headers second: the protocol's
+		// Content-Type/Accept must win (validateHeader also rejects them,
+		// belt and braces).
+		for name, value := range t.uri.ExtraHeaders {
+			req.Header.Set(name, value)
+		}
 		req.Header.Set("Content-Type", codec.DuckDBMIMEType)
 		req.Header.Set("Accept", codec.DuckDBMIMEType)
 

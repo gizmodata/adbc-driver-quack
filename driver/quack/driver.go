@@ -32,6 +32,12 @@ const (
 	OptionConnectTimeout = "adbc.quack.rpc.timeout_seconds.connect"
 	OptionRequestTimeout = "adbc.quack.rpc.timeout_seconds.request"
 	OptionIngestTable    = adbc.OptionKeyIngestTargetTable
+	// OptionHTTPHeaderPrefix + <Header-Name> sets an extra HTTP header
+	// sent with every request (proxy/LB auth); an empty value clears it.
+	// Mirrors duckdb-quack's EXTRA_HTTP_HEADERS secret parameter. Like
+	// the token_env/token_file options, accepted only as ADBC options,
+	// never as URL query parameters.
+	OptionHTTPHeaderPrefix = transport.HTTPHeaderPrefix
 )
 
 // NewDriver returns a quack ADBC driver.

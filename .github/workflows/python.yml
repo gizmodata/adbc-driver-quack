@@ -15,7 +15,7 @@ on:
 #                              └─> github-release
 #
 # - go-test runs `go vet` + `go test -race ./...` on linux + macOS
-# - test runs the Python integration suite (5 Pythons × 3 OS)
+# - test runs the Python unit + integration suite (5 Pythons × 3 OS)
 # - both run on every PR, branch push, and tag push
 # - wheels run only on tag push, gated on **both** test suites passing
 # - publish (PyPI) and github-release run only on tag push, gated on
@@ -104,7 +104,9 @@ jobs:
           python -m pip install -e ".[test]"
 
       - name: Run Python tests
-        run: pytest -v -m integration
+        # No -m filter: run the unit tests (manifest writer etc.) plus
+        # the integration suite against the in-process Quack server.
+        run: pytest -v
 
       - name: Upload c-shared driver library
         # Only upload once per OS — every python version produces the

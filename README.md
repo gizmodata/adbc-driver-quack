@@ -202,6 +202,7 @@ quack://host[:port]
 | `adbc.quack.tls`                          | `false` | `true` → use `https://` for the underlying HTTP transport.               |
 | `adbc.quack.rpc.timeout_seconds.connect`  | `10`    | HTTP connect timeout, as seconds or a Go duration like `1.5s`.           |
 | `adbc.quack.rpc.timeout_seconds.request`  | `60`    | Per-request HTTP timeout, as seconds or a Go duration like `90s`.        |
+| `adbc.quack.http.header.<Name>`           | (none)  | Extra HTTP header sent with every request (proxy/LB auth). Repeatable; empty value clears. Option only — rejected on the URL. |
 
 Token precedence matches `quack-jdbc`: an explicit `adbc.quack.token`
 (or `password`) wins, then `adbc.quack.token_env`, then
@@ -223,6 +224,82 @@ quack.connect(
     },
 )
 ```
+
+### Extra HTTP headers
+
+Gateways and load balancers in front of a Quack server often need their
+own auth. `adbc.quack.http.header.<Name>` options add static headers to
+every request the driver makes (mirroring the `EXTRA_HTTP_HEADERS`
+parameter of DuckDB's own quack secret):
+
+```python
+quack.connect(
+    uri="quack://gateway.example.com:443",
+    db_kwargs={
+        "adbc.quack.tls": "true",
+        "adbc.quack.token": "my-secret-token",
+        "adbc.quack.http.header.X-Proxy-Authorization": "Bearer abc123",
+    },
+)
+```
+
+Like the token indirections, header options are rejected as URL query
+parameters — a pasted URL cannot inject headers into your requests. The
+protocol-owned headers (`Content-Type`, `Accept`, `Host`,
+`Content-Length`) are reserved and cannot be overridden.
+
+## Connection profiles & driver manifests
+
+[ADBC connection profiles](https://arrow.apache.org/adbc/current/format/connection_profiles.html)
+(adbc-driver-manager ≥ 1.11) let you keep a connection's driver +
+options in a reusable TOML file instead of code. Profiles resolve the
+driver by *name*, which requires a
+[driver manifest](https://arrow.apache.org/adbc/current/format/driver_manifests.html)
+on the search path. Install ours once per environment:
+
+```console
+$ python -m adbc_driver_quack install-manifest
+Wrote ADBC driver manifest: .../etc/adbc/drivers/quack.toml
+```
+
+(Inside a virtualenv/conda env this targets the environment's
+auto-searched `etc/adbc/drivers/`; otherwise the per-user ADBC config
+directory. `--user`, `--venv`, and `--dir PATH` override; the same is
+available programmatically as `adbc_driver_quack.install_manifest()`.)
+
+With the manifest in place, the driver manager finds the driver by name
+— no import of `adbc_driver_quack` needed:
+
+```python
+from adbc_driver_manager import dbapi
+
+# Resolve by URI scheme alone:
+conn = dbapi.connect(uri="quack://localhost:9494")
+```
+
+And a profile bundles the whole connection. Drop this in
+`~/.config/adbc/profiles/quack_prod.toml` (Linux;
+`~/Library/Application Support/ADBC/Profiles/` on macOS, or any
+directory named in `ADBC_PROFILE_PATH`):
+
+```toml
+profile_version = 1
+driver = "quack"
+
+[Options]
+uri = "quack://prod.example.com:9494"
+"adbc.quack.tls" = true
+"adbc.quack.token" = "{{ env_var(QUACK_TOKEN) }}"
+```
+
+then connect from any ADBC driver-manager binding:
+
+```python
+conn = dbapi.connect(profile="quack_prod")
+```
+
+The `{{ env_var(...) }}` substitution keeps secrets out of the file;
+options set explicitly in code still override profile values.
 
 ## Why ADBC and not JDBC?
 

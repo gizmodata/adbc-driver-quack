@@ -6,6 +6,45 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Extra HTTP headers**: `adbc.quack.http.header.<Name>` database
+  options add static headers to every request (proxy/LB auth),
+  mirroring the `EXTRA_HTTP_HEADERS` parameter duckdb-quack added to
+  its client secret (duckdb/duckdb-quack#204). Accepted only as ADBC
+  options, never as URL query parameters; protocol-owned headers
+  (`Content-Type`, `Accept`, `Host`, `Content-Length`) are reserved;
+  an empty value clears a previously-set header.
+- **ADBC connection-profile enablement**: `python -m adbc_driver_quack
+  install-manifest` (and `adbc_driver_quack.install_manifest()`) writes
+  a `quack.toml` driver manifest — with the non-default
+  `QuackDriverInit` entrypoint and the wheel's absolute library path —
+  into the environment's `etc/adbc/drivers/` or the per-user ADBC
+  config dir. With it installed, the driver resolves by name from
+  connection profiles (`driver = "quack"`), by bare URI scheme
+  (`adbc_driver_manager.dbapi.connect(uri="quack://...")`), and via
+  `profile://` URIs. README documents the profile workflow.
+- Integration tests covering the new surface end-to-end against the
+  in-process Quack server: manifest name resolution, `quack://` scheme
+  resolution, `profile=` connect with `{{ env_var(...) }}` token
+  substitution, and extra-header options through the full stack. CI's
+  Python job now runs the unit suite too (previously
+  `-m integration` only), picking up the manifest-writer tests.
+
+### Changed
+
+- Python wheel now requires `adbc-driver-manager >= 1.11.0` (first
+  release with connection-profile support; manifests landed in 1.7.0).
+- Verified against DuckDB v1.5.5 (2026-07-22), which bumps the vendored
+  quack extension: wire protocol unchanged (QUACK_VERSION 1); the
+  server floor stays v1.5.3 and the `duckdb >=1.5.3` test dependency
+  resolves to 1.5.5 automatically.
+
+- Bumped `github.com/apache/arrow-go/v18` v18.6.0 → v18.7.0 and
+  refreshed indirect Go module dependencies (otel v1.44.0, klauspost
+  compress/cpuid, lz4, golang.org/x/* — see `go.mod`).
+  `arrow-adbc/go/adbc` stays at v1.11.0 (latest release).
+
 ## [0.1.0-alpha.8] — 2026-06-12
 
 ### Fixed — parity with quack-jdbc `0.2.0-alpha.x`

@@ -11,11 +11,20 @@ import adbc_driver_manager
 from ._version import __version__  # noqa: F401
 
 __all__ = [
+    "HTTP_HEADER_OPTION_PREFIX",
     "ConnectionOptions",
     "DatabaseOptions",
     "StatementOptions",
     "connect",
+    "install_manifest",
 ]
+
+#: Prefix for extra-HTTP-header database options. Append the header
+#: name: ``{"adbc.quack.http.header.X-Proxy-Auth": "secret"}`` sends
+#: ``X-Proxy-Auth: secret`` with every request (proxy/LB auth). An
+#: empty value clears the header. Accepted only as ADBC options, never
+#: as URL query parameters.
+HTTP_HEADER_OPTION_PREFIX = "adbc.quack.http.header."
 
 
 class DatabaseOptions(enum.Enum):
@@ -125,3 +134,16 @@ def connect(
         # dict keys, not a merge target — so the merge arg stays positional.
         kwargs.update(db_kwargs)
     return adbc_driver_manager.AdbcDatabase(**kwargs)
+
+
+def install_manifest(*args, **kwargs):
+    """Write the quack.toml ADBC driver manifest; see :mod:`._manifest`.
+
+    After installing the manifest, this driver can be resolved by name —
+    via connection profiles (``driver = "quack"``) or directly by URI
+    scheme: ``adbc_driver_manager.dbapi.connect(uri="quack://...")``.
+    Also available as ``python -m adbc_driver_quack install-manifest``.
+    """
+    from ._manifest import install_manifest as _impl
+
+    return _impl(*args, **kwargs)

@@ -201,3 +201,59 @@ func TestIPv6Host(t *testing.T) {
 		t.Errorf("httpURL: got %q want %q", u.HTTPURL(), want)
 	}
 }
+
+func TestExtraHeadersFromOptions(t *testing.T) {
+	u, err := ParseURI("quack://h:9494", map[string]string{
+		HTTPHeaderPrefix + "X-Proxy-Auth": "s3cret",
+		HTTPHeaderPrefix + "X-Trace-Id":   "abc123",
+	})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := u.ExtraHeaders["X-Proxy-Auth"]; got != "s3cret" {
+		t.Errorf("X-Proxy-Auth: got %q", got)
+	}
+	if got := u.ExtraHeaders["X-Trace-Id"]; got != "abc123" {
+		t.Errorf("X-Trace-Id: got %q", got)
+	}
+	// Header options must not leak into Params (they are not query params).
+	for k := range u.Params {
+		if strings.HasPrefix(k, HTTPHeaderPrefix) {
+			t.Errorf("header option leaked into Params: %q", k)
+		}
+	}
+}
+
+func TestExtraHeadersEmptyValueClears(t *testing.T) {
+	u, err := ParseURI("quack://h:9494", map[string]string{
+		HTTPHeaderPrefix + "X-Gone": "",
+	})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if _, ok := u.ExtraHeaders["X-Gone"]; ok {
+		t.Errorf("empty-valued header should be cleared")
+	}
+}
+
+func TestExtraHeadersRejectedInURL(t *testing.T) {
+	_, err := ParseURI("quack://h:9494?adbc.quack.http.header.X-Evil=1", nil)
+	if err == nil || !strings.Contains(err.Error(), "not a URL query parameter") {
+		t.Fatalf("expected URL-param rejection, got %v", err)
+	}
+}
+
+func TestExtraHeadersValidation(t *testing.T) {
+	cases := map[string]map[string]string{
+		"empty name":     {HTTPHeaderPrefix: "v"},
+		"space in name":  {HTTPHeaderPrefix + "Bad Name": "v"},
+		"crlf in value":  {HTTPHeaderPrefix + "X-H": "a\r\nInjected: 1"},
+		"reserved":       {HTTPHeaderPrefix + "Content-Type": "text/plain"},
+		"reserved lower": {HTTPHeaderPrefix + "host": "evil.example"},
+	}
+	for name, opts := range cases {
+		if _, err := ParseURI("quack://h:9494", opts); err == nil {
+			t.Errorf("%s: expected error", name)
+		}
+	}
+}

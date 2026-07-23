@@ -22,7 +22,9 @@ keywords = [
     "sql",
 ]
 dependencies = [
-    "adbc-driver-manager >=1.0.0",
+    # >=1.11.0 for driver-manifest + connection-profile resolution
+    # (profile=..., uri="profile://...", quack:// scheme lookup).
+    "adbc-driver-manager >=1.11.0",
     "importlib-resources >=1.3",
     # pyarrow is required for any DBAPI cursor method that returns
     # Arrow data (fetch_arrow_table, fetch_record_batch, etc.) — i.e.
