@@ -184,6 +184,11 @@ jobs:
             goarch: arm64
             ext: dll
             dll_only: true
+            # llvm-mingw clang warns that cgo's generated export-header
+            # prolog re-adds dllexport to declarations from exports.go —
+            # a cosmetic cgo artifact (gcc doesn't warn) that GitHub's
+            # problem matcher renders as red "error" annotations.
+            extra_cflags: -Wno-dll-attribute-on-redeclaration
     steps:
       - uses: actions/checkout@v6
 
@@ -217,6 +222,9 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '1'
+          # Keep cgo's default flags and append per-platform extras
+          # (setting CGO_CFLAGS at all replaces the "-O2 -g" default).
+          CGO_CFLAGS: -O2 -g ${{ matrix.extra_cflags }}
         run: |
           go build -buildmode=c-shared -tags driverlib \
             -o "pkg/quack/libadbc_driver_quack.${{ matrix.ext }}" ./pkg/quack
@@ -365,7 +373,7 @@ jobs:
           ls -la release-bundle/
 
       - name: Attach to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           body_path: release_notes.md
           files: |

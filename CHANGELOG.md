@@ -6,6 +6,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- CI: suppressed the cosmetic `-Wdll-attribute-on-redeclaration` clang
+  warnings from cgo's generated export header on the windows/arm64
+  build (GitHub's problem matcher rendered them as red error
+  annotations despite the build succeeding), and bumped
+  `softprops/action-gh-release` v2 → v3 (Node 24).
+
 ## [0.1.0-alpha.9] — 2026-07-22
 
 ### Added
