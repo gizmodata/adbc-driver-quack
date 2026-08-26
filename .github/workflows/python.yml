@@ -222,6 +222,9 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '1'
+          # Let the macOS wheel install on macOS 12+ rather than only on
+          # the runner's own release (it was tagged macosx_26_0).
+          MACOSX_DEPLOYMENT_TARGET: '12.0'
           # Keep cgo's default flags and append per-platform extras
           # (setting CGO_CFLAGS at all replaces the "-O2 -g" default).
           CGO_CFLAGS: -O2 -g ${{ matrix.extra_cflags }}
@@ -233,6 +236,8 @@ jobs:
       - name: Build wheel
         if: ${{ !matrix.dll_only }}
         shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '12.0'
         run: |
           python -m pip install --upgrade pip build
           python -m build --wheel
