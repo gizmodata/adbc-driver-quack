@@ -6,6 +6,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.11] — 2026-08-26
+
+### Added
+- Client-side parameter binding: values bound with `Bind`/`BindStream` (or
+  DBAPI `parameters=`) are rendered as DuckDB literals in place of `?`, once per
+  bound row. Makes DuckDB `adbc_scanner` filter pushdown work against Quack.
+- README section and tests for DuckDB's `adbc_scanner` (`CREATE SECRET` +
+  `ATTACH`) and Columnar's `adbc` extensions.
+
 ## [0.1.0-alpha.10] — 2026-08-26
 ### Fixed
 - macOS wheel is built with `MACOSX_DEPLOYMENT_TARGET=12.0` so it installs on

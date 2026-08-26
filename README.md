@@ -301,6 +301,42 @@ conn = dbapi.connect(profile="quack_prod")
 The `{{ env_var(...) }}` substitution keeps secrets out of the file;
 options set explicitly in code still override profile values.
 
+## Query Quack from DuckDB or GizmoSQL (`adbc_scanner`)
+
+The c-shared driver plugs into DuckDB's
+[`adbc_scanner`](https://github.com/Query-farm/adbc_scanner) community
+extension (see the [GizmoSQL guide](https://docs.gizmosql.com/adbc_scanner_duckdb/))
+— and therefore into GizmoSQL, which embeds DuckDB. Put the token in a
+DuckDB secret, `ATTACH`, and query the remote DuckDB with projection and
+filter pushdown (pushed-down filters bind parameters, which this driver
+renders as literals client-side because Quack has no wire-level parameters):
+
+```sql
+INSTALL adbc_scanner FROM community;
+LOAD adbc_scanner;
+
+CREATE SECRET quack_secret (
+    TYPE adbc,
+    SCOPE 'quack://quackhost:9494',
+    driver 'quack',                     -- by name after `python -m adbc_driver_quack install-manifest`,
+                                        -- or a path: '/path/to/libadbc_driver_quack.so'
+    uri 'quack://quackhost:9494',
+    extra_options MAP {'adbc.quack.token': '********'}
+);
+
+ATTACH 'quack://quackhost:9494' AS remote (TYPE adbc);
+SELECT * FROM remote.main.orders WHERE order_date >= DATE '2024-01-01';
+
+SET VARIABLE q = adbc_connect({'secret': 'quack_secret'});
+SELECT * FROM adbc_scan(getvariable('q')::BIGINT, 'SELECT * FROM orders LIMIT 10');
+```
+
+Columnar's [`adbc`](https://github.com/columnar-tech/duckdb-adbc-client)
+extension (connection-profile based, see the
+[GizmoSQL guide](https://docs.gizmosql.com/adbc_duckdb_extension/)) currently
+refuses the DuckDB and Quack drivers by name; `python/tests/test_duckdb_extensions.py`
+tracks both extensions.
+
 ## Why ADBC and not JDBC?
 
 Both drivers speak the same protocol to the same kind of server. Pick the

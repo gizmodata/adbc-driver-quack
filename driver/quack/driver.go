@@ -307,6 +307,9 @@ func (s *statementImpl) ExecuteQuery(ctx context.Context) (array.RecordReader, i
 	if err := s.conn.beginTxIfNeeded(ctx); err != nil {
 		return nil, -1, err
 	}
+	if s.bound != nil || s.boundStream != nil {
+		return s.executeBoundQuery(ctx)
+	}
 	cur, err := s.conn.sess.cursor(ctx, s.sql)
 	if err != nil {
 		return nil, -1, fromTransportError(err)
@@ -332,6 +335,9 @@ func (s *statementImpl) ExecuteUpdate(ctx context.Context) (int64, error) {
 	}
 	if s.sql == "" {
 		return -1, errStatus(adbc.StatusInvalidState, "Statement.ExecuteUpdate: no SQL set")
+	}
+	if s.bound != nil || s.boundStream != nil {
+		return s.executeBoundUpdate(ctx)
 	}
 	// DDL/DML results are small (one Count row at most), so drain eagerly.
 	result, err := s.conn.sess.drainPrepared(ctx, s.sql)
