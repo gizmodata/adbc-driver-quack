@@ -63,7 +63,7 @@ go get github.com/gizmodata/adbc-driver-quack@latest
 ### 3. Connect and query
 
 ```python
-import adbc_driver_quack.dbapi as quack
+from adbc_driver_quack import dbapi as quack
 import pyarrow
 
 with quack.connect(
@@ -144,7 +144,7 @@ result that loses a batch fails loudly instead of coming back short.
 
 ```python
 import pyarrow as pa
-import adbc_driver_quack.dbapi as quack
+from adbc_driver_quack import dbapi as quack
 
 table = pa.table({"id": [1, 2, 3], "name": ["alice", "bob", "carol"]})
 with quack.connect(
@@ -263,7 +263,7 @@ pip install adbc-driver-quack adbc-driver-hardcharger
 ```
 
 ```python
-import adbc_driver_quack.dbapi as quack
+from adbc_driver_quack import dbapi as quack
 from adbc_driver_hardcharger import dbapi as hardcharger
 
 with quack.connect(uri="quack://quack.example.com:9494",

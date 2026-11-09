@@ -22,7 +22,7 @@ def _connect(server):
 
 def test_readme_quickstart_step3_connect_and_query(quack_server):
     """README "Step 3: Connect and query" — the headline example."""
-    import adbc_driver_quack.dbapi as quack
+    from adbc_driver_quack import dbapi as quack
 
     with quack.connect(
         uri=quack_server.uri,
@@ -59,7 +59,7 @@ def test_readme_alternative_manager_pattern(quack_server):
 
 def test_readme_streaming_large_result_set(quack_server):
     """README "Streaming large result sets" — fetch_record_batch loop."""
-    import adbc_driver_quack.dbapi as quack
+    from adbc_driver_quack import dbapi as quack
 
     with quack.connect(
         uri=quack_server.uri,
@@ -82,7 +82,7 @@ def test_readme_bulk_ingest(quack_server):
     default, so without autocommit=True the ingest would roll back on
     close — reading back on the same connection would hide that.
     """
-    import adbc_driver_quack.dbapi as quack
+    from adbc_driver_quack import dbapi as quack
 
     table = pa.table({"id": [1, 2, 3], "name": ["alice", "bob", "carol"]})
     with quack.connect(
@@ -111,7 +111,7 @@ def test_readme_bulk_ingest_explicit_commit(quack_server):
     Also pins the documented footgun: without the commit, a fresh
     connection must NOT see the table (rolled back on close).
     """
-    import adbc_driver_quack.dbapi as quack
+    from adbc_driver_quack import dbapi as quack
 
     table = pa.table({"id": [1, 2, 3], "name": ["alice", "bob", "carol"]})
 
@@ -214,7 +214,7 @@ def test_bulk_ingest_mode_create_append(quack_server):
 
 def test_readme_transactions(quack_server):
     """README "Transactions (autocommit off)" — explicit commit example."""
-    import adbc_driver_quack.dbapi as quack
+    from adbc_driver_quack import dbapi as quack
 
     with quack.connect(
         uri=quack_server.uri,

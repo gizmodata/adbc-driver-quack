@@ -10,7 +10,7 @@ import adbc_driver_manager
 import pyarrow as pa
 import pytest
 
-import adbc_driver_quack.dbapi as quack
+from adbc_driver_quack import dbapi as quack
 
 pytestmark = pytest.mark.integration
 
