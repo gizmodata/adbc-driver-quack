@@ -9,8 +9,10 @@ package codec
 
 // Wire-format constants for the Quack protocol.
 const (
-	// QuackVersion is the Quack protocol version this driver targets.
-	QuackVersion uint64 = 1
+	// QuackVersion is the Quack protocol version this driver targets: 3,
+	// the version DuckDB 2.0 speaks. Version 1 (DuckDB 1.5.x) is not
+	// supported.
+	QuackVersion uint64 = 3
 
 	// DefaultQuackPort is the default TCP port used by Quack HTTP transport.
 	DefaultQuackPort = 9494
@@ -19,7 +21,7 @@ const (
 	QuackEndpoint = "/quack"
 
 	// DuckDBMIMEType is the MIME type used for Quack request/response bodies.
-	DuckDBMIMEType = "application/duckdb"
+	DuckDBMIMEType = "application/vnd.duckdb"
 
 	// FieldEnd marks the end of a BinarySerializer object.
 	FieldEnd uint16 = 0xFFFF

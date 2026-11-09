@@ -4,14 +4,18 @@
 package quack
 
 import (
+	"encoding/hex"
 	"fmt"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
+	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/google/uuid"
 
 	"github.com/gizmodata/adbc-driver-quack/internal/message"
 	"github.com/gizmodata/adbc-driver-quack/internal/quacktype"
@@ -47,26 +51,41 @@ func arrowType(t quacktype.LogicalType) arrow.DataType {
 		quacktype.LogicalTypeIDStringLiteral, quacktype.LogicalTypeIDBigNum,
 		quacktype.LogicalTypeIDEnum:
 		return arrow.BinaryTypes.String
-	case quacktype.LogicalTypeIDBlob, quacktype.LogicalTypeIDBit, quacktype.LogicalTypeIDGeometry:
+	case quacktype.LogicalTypeIDBlob, quacktype.LogicalTypeIDBit:
 		return arrow.BinaryTypes.Binary
+	case quacktype.LogicalTypeIDGeometry:
+		return newGeoArrowWKB(geoArrowMetadata(t))
+	case quacktype.LogicalTypeIDVariant:
+		return extensions.NewDefaultVariantType()
 	case quacktype.LogicalTypeIDDate:
 		return arrow.FixedWidthTypes.Date32
-	case quacktype.LogicalTypeIDTime:
+	case quacktype.LogicalTypeIDTime, quacktype.LogicalTypeIDTimeTZ:
 		return arrow.FixedWidthTypes.Time64us
 	case quacktype.LogicalTypeIDTimeNS:
 		return arrow.FixedWidthTypes.Time64ns
-	case quacktype.LogicalTypeIDTimestamp, quacktype.LogicalTypeIDTimestampSec,
-		quacktype.LogicalTypeIDTimestampMS, quacktype.LogicalTypeIDTimestampNS:
-		return arrow.FixedWidthTypes.Timestamp_us
+	// Not arrow.FixedWidthTypes.Timestamp_*: those carry TimeZone "UTC",
+	// which would make a naive TIMESTAMP look zoned.
+	case quacktype.LogicalTypeIDTimestamp:
+		return &arrow.TimestampType{Unit: arrow.Microsecond}
+	case quacktype.LogicalTypeIDTimestampSec:
+		return &arrow.TimestampType{Unit: arrow.Second}
+	case quacktype.LogicalTypeIDTimestampMS:
+		return &arrow.TimestampType{Unit: arrow.Millisecond}
+	case quacktype.LogicalTypeIDTimestampNS:
+		return &arrow.TimestampType{Unit: arrow.Nanosecond}
 	case quacktype.LogicalTypeIDTimestampTZ:
 		return &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}
+	case quacktype.LogicalTypeIDTimestampTZNS:
+		return &arrow.TimestampType{Unit: arrow.Nanosecond, TimeZone: "UTC"}
 	case quacktype.LogicalTypeIDDecimal:
 		if d, ok := t.TypeInfo.(quacktype.DecimalTypeInfo); ok {
 			return &arrow.Decimal128Type{Precision: int32(d.Width), Scale: int32(d.Scale)}
 		}
 		return &arrow.Decimal128Type{Precision: 38, Scale: 0}
 	case quacktype.LogicalTypeIDUUID:
-		return &arrow.FixedSizeBinaryType{ByteWidth: 16}
+		// The canonical arrow.uuid extension (16 bytes), so a UUID stays a
+		// UUID through Arrow consumers and back into an ingest.
+		return extensions.NewUUIDType()
 	case quacktype.LogicalTypeIDHugeInt, quacktype.LogicalTypeIDUHugeInt:
 		// Arrow has no native int128; map to Decimal128(38, 0) which fits
 		// any signed int128 exactly. UHUGEINT values above 10^38-1 lose
@@ -94,7 +113,7 @@ func arrowType(t quacktype.LogicalType) arrow.DataType {
 			return arrow.ListOf(arrowType(child))
 		}
 		return arrow.FixedSizeListOf(int32(size), arrowType(child))
-	case quacktype.LogicalTypeIDStruct:
+	case quacktype.LogicalTypeIDStruct, quacktype.LogicalTypeIDTuple:
 		children, err := quacktype.GetStructChildren(t)
 		if err != nil || len(children) == 0 {
 			return arrow.BinaryTypes.String
@@ -159,326 +178,58 @@ func RecordFromChunk(allocator memory.Allocator, names []string, chunk message.D
 
 func buildColumn(b array.Builder, t quacktype.LogicalType, vec message.DecodedVector) error {
 	n := vec.Size()
-	switch builder := b.(type) {
-	case *array.BooleanBuilder:
-		for i := 0; i < n; i++ {
-			if vec.IsNull(i) {
-				builder.AppendNull()
-			} else {
-				builder.Append(vec.GetObject(i).(bool))
-			}
+	for i := 0; i < n; i++ {
+		var v interface{}
+		if !vec.IsNull(i) {
+			v = vec.GetObject(i)
 		}
-	case *array.Int8Builder:
-		for i := 0; i < n; i++ {
-			if vec.IsNull(i) {
-				builder.AppendNull()
-			} else {
-				builder.Append(toInt8(vec.GetObject(i)))
-			}
-		}
-	case *array.Int16Builder:
-		for i := 0; i < n; i++ {
-			if vec.IsNull(i) {
-				builder.AppendNull()
-			} else {
-				builder.Append(toInt16(vec.GetObject(i)))
-			}
-		}
-	case *array.Int32Builder:
-		for i := 0; i < n; i++ {
-			if vec.IsNull(i) {
-				builder.AppendNull()
-			} else {
-				builder.Append(toInt32(vec.GetObject(i)))
-			}
-		}
-	case *array.Int64Builder:
-		for i := 0; i < n; i++ {
-			if vec.IsNull(i) {
-				builder.AppendNull()
-			} else {
-				builder.Append(toInt64(vec.GetObject(i)))
-			}
-		}
-	case *array.Uint8Builder:
-		for i := 0; i < n; i++ {
-			if vec.IsNull(i) {
-				builder.AppendNull()
-			} else {
-				builder.Append(uint8(toInt64(vec.GetObject(i))))
-			}
-		}
-	case *array.Uint16Builder:
-		for i := 0; i < n; i++ {
-			if vec.IsNull(i) {
-				builder.AppendNull()
-			} else {
-				builder.Append(uint16(toInt64(vec.GetObject(i))))
-			}
-		}
-	case *array.Uint32Builder:
-		for i := 0; i < n; i++ {
-			if vec.IsNull(i) {
-				builder.AppendNull()
-			} else {
-				builder.Append(uint32(toInt64(vec.GetObject(i))))
-			}
-		}
-	case *array.Uint64Builder:
-		for i := 0; i < n; i++ {
-			if vec.IsNull(i) {
-				builder.AppendNull()
-			} else {
-				builder.Append(uint64(toInt64(vec.GetObject(i))))
-			}
-		}
-	case *array.Float32Builder:
-		for i := 0; i < n; i++ {
-			if vec.IsNull(i) {
-				builder.AppendNull()
-			} else {
-				builder.Append(float32(toFloat64(vec.GetObject(i))))
-			}
-		}
-	case *array.Float64Builder:
-		for i := 0; i < n; i++ {
-			if vec.IsNull(i) {
-				builder.AppendNull()
-			} else {
-				builder.Append(toFloat64(vec.GetObject(i)))
-			}
-		}
-	case *array.StringBuilder:
-		for i := 0; i < n; i++ {
-			if vec.IsNull(i) {
-				builder.AppendNull()
-			} else {
-				builder.Append(fmt.Sprintf("%v", vec.GetObject(i)))
-			}
-		}
-	case *array.BinaryBuilder:
-		for i := 0; i < n; i++ {
-			if vec.IsNull(i) {
-				builder.AppendNull()
-			} else {
-				v := vec.GetObject(i)
-				if b, ok := v.([]byte); ok {
-					builder.Append(b)
-				} else {
-					builder.Append([]byte(fmt.Sprintf("%v", v)))
-				}
-			}
-		}
-	case *array.Date32Builder:
-		for i := 0; i < n; i++ {
-			if vec.IsNull(i) {
-				builder.AppendNull()
-			} else if v, ok := vec.GetObject(i).(time.Time); ok {
-				epoch := time.Date(1970, time.January, 1, 0, 0, 0, 0, time.UTC)
-				builder.Append(arrow.Date32(int32(v.Sub(epoch).Hours() / 24)))
-			} else {
-				builder.AppendNull()
-			}
-		}
-	case *array.Time64Builder:
-		for i := 0; i < n; i++ {
-			if vec.IsNull(i) {
-				builder.AppendNull()
-			} else if v, ok := vec.GetObject(i).(time.Time); ok {
-				vUTC := v.UTC()
-				micros := int64(time.Duration(vUTC.Hour())*time.Hour+
-					time.Duration(vUTC.Minute())*time.Minute+
-					time.Duration(vUTC.Second())*time.Second+
-					time.Duration(vUTC.Nanosecond())) / int64(time.Microsecond)
-				builder.Append(arrow.Time64(micros))
-			} else {
-				builder.AppendNull()
-			}
-		}
-	case *array.TimestampBuilder:
-		for i := 0; i < n; i++ {
-			if vec.IsNull(i) {
-				builder.AppendNull()
-			} else if v, ok := vec.GetObject(i).(time.Time); ok {
-				builder.Append(arrow.Timestamp(v.UnixMicro()))
-			} else {
-				builder.AppendNull()
-			}
-		}
-	case *array.Decimal128Builder:
-		for i := 0; i < n; i++ {
-			if vec.IsNull(i) {
-				builder.AppendNull()
-				continue
-			}
-			v := vec.GetObject(i)
-			switch x := v.(type) {
-			case *big.Rat:
-				dt, _ := b.Type().(*arrow.Decimal128Type)
-				scaleFactor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(dt.Scale)), nil)
-				num := new(big.Int).Mul(x.Num(), scaleFactor)
-				unscaled := new(big.Int).Quo(num, x.Denom())
-				builder.Append(decimal128.FromBigInt(unscaled))
-			case *big.Int:
-				// HUGEINT / UHUGEINT path: the value is already an
-				// unscaled int128, so the Decimal128 representation is
-				// the int128 itself with scale=0.
-				builder.Append(decimal128.FromBigInt(x))
-			default:
-				builder.AppendNull()
-			}
-		}
-	case *array.FixedSizeBinaryBuilder:
-		for i := 0; i < n; i++ {
-			if vec.IsNull(i) {
-				builder.AppendNull()
-			} else if s, ok := vec.GetObject(i).(string); ok && len(s) == 36 {
-				bytes := uuidStringToBytes(s)
-				builder.Append(bytes)
-			} else {
-				builder.AppendNull()
-			}
-		}
-	case *array.ListBuilder:
-		// LIST<T>: decoder returns each row as []interface{} of child values.
-		valueBuilder := builder.ValueBuilder()
-		childType, _ := quacktype.GetChildType(t)
-		for i := 0; i < n; i++ {
-			if vec.IsNull(i) {
-				builder.AppendNull()
-				continue
-			}
-			items, ok := vec.GetObject(i).([]interface{})
-			if !ok {
-				builder.AppendNull()
-				continue
-			}
-			builder.Append(true)
-			if err := appendBoxedSlice(valueBuilder, childType, items); err != nil {
-				return err
-			}
-		}
-	case *array.FixedSizeListBuilder:
-		// ARRAY<T>[N]: same row shape as LIST, but each entry must be exactly N items.
-		valueBuilder := builder.ValueBuilder()
-		childType, _ := quacktype.GetChildType(t)
-		for i := 0; i < n; i++ {
-			if vec.IsNull(i) {
-				builder.AppendNull()
-				continue
-			}
-			items, ok := vec.GetObject(i).([]interface{})
-			if !ok {
-				builder.AppendNull()
-				continue
-			}
-			builder.Append(true)
-			if err := appendBoxedSlice(valueBuilder, childType, items); err != nil {
-				return err
-			}
-		}
-	case *array.StructBuilder:
-		// STRUCT: decoder returns each row as map[string]interface{}.
-		children, _ := quacktype.GetStructChildren(t)
-		for i := 0; i < n; i++ {
-			if vec.IsNull(i) {
-				builder.AppendNull()
-				continue
-			}
-			row, ok := vec.GetObject(i).(map[string]interface{})
-			if !ok {
-				builder.AppendNull()
-				continue
-			}
-			builder.Append(true)
-			for ci, child := range children {
-				val, present := row[child.Name]
-				if err := appendBoxedScalar(builder.FieldBuilder(ci), child.Type, val, !present || val == nil); err != nil {
-					return err
-				}
-			}
-		}
-	case *array.MapBuilder:
-		// MAP: decoder encodes as LIST<STRUCT<key, value>> — each row is
-		// []interface{} of map[string]interface{} entries.
-		keyBuilder := builder.KeyBuilder()
-		itemBuilder := builder.ItemBuilder()
-		var keyType, valueType quacktype.LogicalType
-		if childList, err := quacktype.GetChildType(t); err == nil {
-			if kvChildren, err := quacktype.GetStructChildren(childList); err == nil && len(kvChildren) == 2 {
-				keyType, valueType = kvChildren[0].Type, kvChildren[1].Type
-			}
-		}
-		for i := 0; i < n; i++ {
-			if vec.IsNull(i) {
-				builder.AppendNull()
-				continue
-			}
-			entries, ok := vec.GetObject(i).([]interface{})
-			if !ok {
-				builder.AppendNull()
-				continue
-			}
-			builder.Append(true)
-			for _, e := range entries {
-				kv, ok := e.(map[string]interface{})
-				if !ok {
-					continue
-				}
-				k, kPresent := kv["key"]
-				v, vPresent := kv["value"]
-				if err := appendBoxedScalar(keyBuilder, keyType, k, !kPresent || k == nil); err != nil {
-					return err
-				}
-				if err := appendBoxedScalar(itemBuilder, valueType, v, !vPresent || v == nil); err != nil {
-					return err
-				}
-			}
-		}
-	default:
-		// Fallback — try string-format the value.
-		if sb, ok := b.(*array.StringBuilder); ok {
-			for i := 0; i < n; i++ {
-				if vec.IsNull(i) {
-					sb.AppendNull()
-				} else {
-					sb.Append(fmt.Sprintf("%v", vec.GetObject(i)))
-				}
-			}
-			return nil
-		}
-		return fmt.Errorf("arrowconv: builder %T not yet handled (type %s)", b, t.ID)
-	}
-	return nil
-}
-
-// appendBoxedSlice appends each element of items into valueBuilder by
-// dispatching on the arrow builder's concrete type. Used by ListBuilder
-// and FixedSizeListBuilder paths where each row is a []interface{}.
-func appendBoxedSlice(b array.Builder, childType quacktype.LogicalType, items []interface{}) error {
-	for _, v := range items {
-		if err := appendBoxedScalar(b, childType, v, v == nil); err != nil {
-			return err
+		if err := appendValue(b, t, v); err != nil {
+			return fmt.Errorf("row %d: %w", i, err)
 		}
 	}
 	return nil
 }
 
-// appendBoxedScalar appends a single interface{} value into builder b,
-// respecting the declared childType. The caller passes isNull=true to
-// force a null (e.g. when the source map didn't contain the field).
-func appendBoxedScalar(b array.Builder, childType quacktype.LogicalType, v interface{}, isNull bool) error {
-	if isNull {
+func valueMismatch(b array.Builder, t quacktype.LogicalType, v interface{}) error {
+	return fmt.Errorf("arrowconv: cannot append %T to %s for %s", v, b.Type(), t.ID)
+}
+
+// appendValue appends one decoded value (nil = NULL) to b. It is used for
+// top-level columns and, recursively, for the children of LIST, ARRAY,
+// STRUCT and MAP values, so a nested value converts exactly like a
+// top-level one. A value of an unexpected Go type is an error, never a
+// silent NULL.
+func appendValue(b array.Builder, t quacktype.LogicalType, v interface{}) error {
+	if v == nil {
 		b.AppendNull()
 		return nil
 	}
 	switch bb := b.(type) {
-	case *array.BooleanBuilder:
-		if x, ok := v.(bool); ok {
-			bb.Append(x)
-		} else {
-			bb.AppendNull()
+	case *extensions.VariantBuilder:
+		val, err := duckVariantToParquet(v)
+		if err != nil {
+			return err
 		}
+		bb.Append(val)
+	case *extensions.UUIDBuilder:
+		str, ok := v.(string)
+		if !ok {
+			return valueMismatch(b, t, v)
+		}
+		u, err := uuid.Parse(str)
+		if err != nil {
+			return fmt.Errorf("arrowconv: invalid UUID %q", str)
+		}
+		bb.Append(u)
+	case *array.ExtensionBuilder:
+		// geoarrow.wkb: WKB bytes in the binary storage.
+		return appendValue(bb.StorageBuilder(), t, v)
+	case *array.BooleanBuilder:
+		x, ok := v.(bool)
+		if !ok {
+			return valueMismatch(b, t, v)
+		}
+		bb.Append(x)
 	case *array.Int8Builder:
 		bb.Append(toInt8(v))
 	case *array.Int16Builder:
@@ -494,109 +245,184 @@ func appendBoxedScalar(b array.Builder, childType quacktype.LogicalType, v inter
 	case *array.Uint32Builder:
 		bb.Append(uint32(toInt64(v)))
 	case *array.Uint64Builder:
-		bb.Append(uint64(toInt64(v)))
+		if x, ok := v.(uint64); ok {
+			bb.Append(x)
+		} else {
+			bb.Append(uint64(toInt64(v)))
+		}
 	case *array.Float32Builder:
 		bb.Append(float32(toFloat64(v)))
 	case *array.Float64Builder:
 		bb.Append(toFloat64(v))
 	case *array.StringBuilder:
-		if s, ok := v.(string); ok {
-			bb.Append(s)
-		} else if b2, ok := v.([]byte); ok {
-			bb.Append(string(b2))
-		} else {
-			bb.Append(fmt.Sprintf("%v", v))
+		switch x := v.(type) {
+		case string:
+			bb.Append(x)
+		case []byte:
+			bb.Append(string(x))
+		default:
+			bb.Append(fmt.Sprintf("%v", x))
 		}
 	case *array.BinaryBuilder:
-		if b2, ok := v.([]byte); ok {
-			bb.Append(b2)
-		} else if s, ok := v.(string); ok {
-			bb.Append([]byte(s))
-		} else {
-			bb.AppendNull()
+		switch x := v.(type) {
+		case []byte:
+			bb.Append(x)
+		case string:
+			bb.Append([]byte(x))
+		default:
+			return valueMismatch(b, t, v)
 		}
+	case *array.Date32Builder:
+		x, ok := v.(time.Time)
+		if !ok {
+			return valueMismatch(b, t, v)
+		}
+		bb.Append(arrow.Date32(floorDiv(x.Unix(), 86400)))
+	case *array.Time64Builder:
+		unit := bb.Type().(*arrow.Time64Type).Unit
+		switch x := v.(type) {
+		case time.Time:
+			// TIME / TIME_NS decode as the epoch day plus the time of day,
+			// so 24:00:00 survives as a full day.
+			nanos := x.Sub(time.Unix(0, 0).UTC()).Nanoseconds()
+			if unit == arrow.Nanosecond {
+				bb.Append(arrow.Time64(nanos))
+			} else {
+				bb.Append(arrow.Time64(nanos / 1000))
+			}
+		case int64:
+			// TIME_TZ: the upper 40 bits are the local time in micros, as
+			// DuckDB's own Arrow export reports it.
+			bb.Append(arrow.Time64(x >> 24))
+		default:
+			return valueMismatch(b, t, v)
+		}
+	case *array.TimestampBuilder:
+		x, ok := v.(time.Time)
+		if !ok {
+			return valueMismatch(b, t, v)
+		}
+		switch bb.Type().(*arrow.TimestampType).Unit {
+		case arrow.Second:
+			bb.Append(arrow.Timestamp(x.Unix()))
+		case arrow.Millisecond:
+			bb.Append(arrow.Timestamp(x.UnixMilli()))
+		case arrow.Nanosecond:
+			bb.Append(arrow.Timestamp(x.UnixNano()))
+		default:
+			bb.Append(arrow.Timestamp(x.UnixMicro()))
+		}
+	case *array.MonthDayNanoIntervalBuilder:
+		x, ok := v.(message.IntervalValue)
+		if !ok {
+			return valueMismatch(b, t, v)
+		}
+		bb.Append(arrow.MonthDayNanoInterval{Months: x.Months, Days: x.Days, Nanoseconds: x.Micros * 1000})
 	case *array.Decimal128Builder:
 		switch x := v.(type) {
-		case *big.Int:
-			bb.Append(decimal128.FromBigInt(x))
 		case *big.Rat:
-			dt, _ := bb.Type().(*arrow.Decimal128Type)
+			dt := bb.Type().(*arrow.Decimal128Type)
 			scaleFactor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(dt.Scale)), nil)
 			num := new(big.Int).Mul(x.Num(), scaleFactor)
-			unscaled := new(big.Int).Quo(num, x.Denom())
-			bb.Append(decimal128.FromBigInt(unscaled))
+			bb.Append(decimal128.FromBigInt(new(big.Int).Quo(num, x.Denom())))
+		case *big.Int:
+			// HUGEINT / UHUGEINT: already an unscaled integer.
+			bb.Append(decimal128.FromBigInt(x))
 		default:
-			bb.AppendNull()
+			return valueMismatch(b, t, v)
 		}
+	case *array.FixedSizeBinaryBuilder:
+		s, ok := v.(string)
+		if !ok {
+			return valueMismatch(b, t, v)
+		}
+		raw, err := uuidStringToBytes(s)
+		if err != nil {
+			return err
+		}
+		bb.Append(raw)
 	case *array.ListBuilder:
-		// Nested LIST inside LIST/STRUCT — recurse.
-		if items, ok := v.([]interface{}); ok {
-			bb.Append(true)
-			inner, _ := quacktype.GetChildType(childType)
-			return appendBoxedSlice(bb.ValueBuilder(), inner, items)
+		items, ok := v.([]interface{})
+		if !ok {
+			return valueMismatch(b, t, v)
 		}
-		bb.AppendNull()
+		childType, _ := quacktype.GetChildType(t)
+		bb.Append(true)
+		for _, item := range items {
+			if err := appendValue(bb.ValueBuilder(), childType, item); err != nil {
+				return err
+			}
+		}
 	case *array.FixedSizeListBuilder:
-		if items, ok := v.([]interface{}); ok {
-			bb.Append(true)
-			inner, _ := quacktype.GetChildType(childType)
-			return appendBoxedSlice(bb.ValueBuilder(), inner, items)
+		items, ok := v.([]interface{})
+		if !ok {
+			return valueMismatch(b, t, v)
 		}
-		bb.AppendNull()
+		childType, _ := quacktype.GetChildType(t)
+		bb.Append(true)
+		for _, item := range items {
+			if err := appendValue(bb.ValueBuilder(), childType, item); err != nil {
+				return err
+			}
+		}
 	case *array.StructBuilder:
 		row, ok := v.(map[string]interface{})
 		if !ok {
-			bb.AppendNull()
-			return nil
+			return valueMismatch(b, t, v)
+		}
+		children, _ := quacktype.GetStructChildren(t)
+		bb.Append(true)
+		for ci, child := range children {
+			if err := appendValue(bb.FieldBuilder(ci), child.Type, row[quacktype.StructFieldKey(children, ci)]); err != nil {
+				return err
+			}
+		}
+	case *array.MapBuilder:
+		entries, ok := v.([]interface{})
+		if !ok {
+			return valueMismatch(b, t, v)
+		}
+		var keyType, valueType quacktype.LogicalType
+		if entryType, err := quacktype.GetChildType(t); err == nil {
+			if kv, err := quacktype.GetStructChildren(entryType); err == nil && len(kv) == 2 {
+				keyType, valueType = kv[0].Type, kv[1].Type
+			}
 		}
 		bb.Append(true)
-		children, _ := quacktype.GetStructChildren(childType)
-		for ci, child := range children {
-			val, present := row[child.Name]
-			if err := appendBoxedScalar(bb.FieldBuilder(ci), child.Type, val, !present || val == nil); err != nil {
+		for _, e := range entries {
+			kv, ok := e.(map[string]interface{})
+			if !ok {
+				return valueMismatch(b, t, e)
+			}
+			if err := appendValue(bb.KeyBuilder(), keyType, kv["key"]); err != nil {
+				return err
+			}
+			if err := appendValue(bb.ItemBuilder(), valueType, kv["value"]); err != nil {
 				return err
 			}
 		}
 	default:
-		// Last-resort: stringify into a StringBuilder if that's what we got.
-		if sb, ok := b.(*array.StringBuilder); ok {
-			sb.Append(fmt.Sprintf("%v", v))
-		} else {
-			b.AppendNull()
-		}
+		return fmt.Errorf("arrowconv: builder %T not handled (type %s)", b, t.ID)
 	}
 	return nil
 }
 
-func uuidStringToBytes(s string) []byte {
-	out := make([]byte, 0, 16)
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c == '-' {
-			continue
-		}
-		var nib byte
-		switch {
-		case c >= '0' && c <= '9':
-			nib = c - '0'
-		case c >= 'a' && c <= 'f':
-			nib = c - 'a' + 10
-		case c >= 'A' && c <= 'F':
-			nib = c - 'A' + 10
-		}
-		if i%2 == 0 && len(out) > 0 && len(out) < 16 {
-			out[len(out)-1] |= nib
-		} else {
-			if len(out) >= 16 {
-				break
-			}
-			out = append(out, nib<<4)
-		}
+func floorDiv(a, b int64) int32 {
+	q := a / b
+	if (a%b != 0) && ((a < 0) != (b < 0)) {
+		q--
 	}
-	for len(out) < 16 {
-		out = append(out, 0)
+	return int32(q)
+}
+
+// uuidStringToBytes parses a canonical 8-4-4-4-12 UUID into its 16 bytes.
+func uuidStringToBytes(s string) ([]byte, error) {
+	clean := strings.ReplaceAll(s, "-", "")
+	raw, err := hex.DecodeString(clean)
+	if err != nil || len(raw) != 16 {
+		return nil, fmt.Errorf("arrowconv: invalid UUID %q", s)
 	}
-	return out
+	return raw, nil
 }
 
 func toInt8(v interface{}) int8 {

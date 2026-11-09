@@ -4,91 +4,98 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+    # Documentation-only pushes don't rebuild (path filters never apply to tags).
+    paths-ignore: ['**/*.md', 'docs/**', 'LICENSE', 'NOTICE', '.idea/**']
   pull_request:
     branches: [main]
+    paths-ignore: ['**/*.md', 'docs/**', 'LICENSE', 'NOTICE', '.idea/**']
   workflow_dispatch:
 
+# A newer run on the same branch cancels the older one; a tag run never is.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
 # One workflow, one DAG:
-#   ┌─ go-test ─┐
-#   │           ├─> wheels ──> publish (PyPI)
-#   └─ test  ───┘            ╲
-#                              └─> github-release
 #
-# - go-test runs `go vet` + `go test -race ./...` on linux + macOS
-# - test runs the Python unit + integration suite (5 Pythons × 3 OS)
-# - both run on every PR, branch push, and tag push
-# - wheels run only on tag push, gated on **both** test suites passing
-# - publish (PyPI) and github-release run only on tag push, gated on
-#   all wheels building successfully
+#   go-test ────┐
+#   test ───────┼─> wheels ─> old-glibc ─┬─> publish (PyPI)
+#   conformance ┘                        └─> github-release ─> pkgsite-warm
+#
+# - go-test: go vet + go test -race, plus apache/arrow-adbc's Go validation
+#   suite and the live tests against a DuckDB 2.0 Quack server
+# - test: the Python suite (5 Pythons x 3 OS); on Linux also against a
+#   Hardcharger server (Quack -> Hardcharger, adbc_scanner in Hardcharger)
+# - conformance: the adbc-drivers.org validation suite (validation/)
+# - wheels build and smoke-test every wheel; old-glibc installs the Linux
+#   wheels on a glibc-2.28 distro. publish and github-release run on v* tags
+#   only, after every test job passed on the tagged commit itself.
+
+env:
+  GO_VERSION: '1.27.3'
 
 jobs:
   go-test:
-    name: Go tests
+    name: Go tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+    env:
+      ADBC_QUACK_TEST_URI: quack://127.0.0.1:9494
+      ADBC_QUACK_TEST_REQUIRE: '1'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
-          go-version: '1.25'
+          go-version: ${{ env.GO_VERSION }}
           cache: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+
+      - name: Start a DuckDB 2.0 Quack server
+        run: |
+          python -m pip install --quiet "duckdb>=2.0.0"
+          python scripts/quack_test_server.py --port 9494 > quack-server.log 2>&1 &
+          for i in $(seq 1 30); do grep -q READY quack-server.log && break; sleep 1; done
+          cat quack-server.log
+          grep -q READY quack-server.log
 
       - name: go vet
         run: go vet ./...
 
-      - name: go test
-        run: go test -race -timeout 5m ./...
+      - name: go test (unit, live, ADBC validation suite)
+        run: go test -race -count=1 -timeout 10m ./...
 
   test:
-    name: Python tests
+    name: Python ${{ matrix.python }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # Windows now blocks the workflow — earlier the leg was best-effort
-    # because of the DuckDB CLI install dance; with the in-process duckdb
-    # python package fixture there's no reason to let Windows-only
-    # failures slip through. If we ship a wheel for it, tests must pass.
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ['3.10', '3.11', '3.12', '3.13', '3.14']
+        python: ['3.11', '3.12', '3.13', '3.14', '3.15']
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
-          go-version: '1.25'
+          go-version: ${{ env.GO_VERSION }}
           cache: false
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
 
-      - name: Install clang-format (macOS)
-        if: matrix.os == 'macos-latest'
-        # The runner image ships with aws/tap pre-tapped, which trips
-        # Homebrew's tap-trust warning on every brew command. We don't
-        # use anything from it — untap it first (with the trust check
-        # suppressed for that one command so the untap itself is quiet).
-        run: |
-          HOMEBREW_NO_REQUIRE_TAP_TRUST=1 brew untap aws/tap 2>/dev/null || true
-          brew install clang-format
-
-      - name: Install goimports + clang-format (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          go install golang.org/x/tools/cmd/goimports@latest
-          sudo apt-get update && sudo apt-get install -y clang-format
-
       - name: Build c-shared driver library
         run: |
-          export PATH="$HOME/go/bin:$PATH"
           case "${{ runner.os }}" in
             macOS)   SUFFIX=dylib ;;
             Windows) SUFFIX=dll   ;;
@@ -104,45 +111,96 @@ jobs:
           fi
           echo "ADBC_QUACK_LIBRARY=${LIB_PATH}" >> "$GITHUB_ENV"
 
-      - name: Install Python wheel from source tree
+      - name: Start Hardcharger
+        # The Quack -> Hardcharger tests and the adbc_scanner tests inside
+        # Hardcharger (https://gizmodata.com/hardcharger; test-only, the driver
+        # has no Hardcharger code). Linux only: the server image is Linux.
+        # Started after the build so it can load this commit's driver; host
+        # networking lets it reach the in-process Quack server on 127.0.0.1.
+        if: runner.os == 'Linux'
+        run: |
+          for i in 1 2 3 4 5; do docker pull -q "$HARDCHARGER_IMAGE" && break; [ $i = 5 ] && exit 1; sleep $((i * 15)); done
+          docker run -d --name hardcharger --network host \
+            -v "$PWD/pkg/quack:/drivers:ro" \
+            -e HARDCHARGER_ADMIN_USERNAME=hardcharger -e HARDCHARGER_ADMIN_PASSWORD=hardcharger \
+            "$HARDCHARGER_IMAGE"
+          docker run --rm "$HARDCHARGER_IMAGE" --version
+          {
+            echo "ADBC_QUACK_TEST_HARDCHARGER_URI=hardcharger://127.0.0.1:31337?tls=false"
+            echo "ADBC_QUACK_TEST_HARDCHARGER_DRIVER_PATH=/drivers/libadbc_driver_quack.so"
+            echo "PYTEST_MARKS="
+          } >> "$GITHUB_ENV"
+        env:
+          HARDCHARGER_IMAGE: ghcr.io/gizmodata/hardcharger:latest
+
+      - name: Deselect the Hardcharger tests (no Hardcharger server on this OS)
+        if: runner.os != 'Linux'
+        run: echo "PYTEST_MARKS=not hardcharger" >> "$GITHUB_ENV"
+
+      - name: Install the package from the source tree
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[test]"
 
       - name: Run Python tests
-        # No -m filter: run the unit tests (manifest writer etc.) plus
-        # the integration suite against the in-process Quack server.
-        run: pytest -v
+        # Unit tests plus the integration suite against an in-process DuckDB
+        # 2.0 Quack server. A server that fails to start fails the run.
+        run: pytest -v -m "${PYTEST_MARKS}"
 
-      - name: Upload c-shared driver library
-        # Only upload once per OS — every python version produces the
-        # same binary so we keep the 3.12 build to avoid duplicates.
-        # (Use 3.12 specifically because that's the version the wheel
-        # job below uses.)
-        if: matrix.python == '3.12'
+      - name: Hardcharger log on failure
+        if: failure() && runner.os == 'Linux'
+        run: docker logs hardcharger 2>&1 | tail -200
+
+  conformance:
+    name: ADBC conformance suite (adbc-drivers.org)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+
+      - name: Build the driver and install the suite
+        run: |
+          go build -buildmode=c-shared -tags driverlib -o pkg/quack/libadbc_driver_quack.so ./pkg/quack
+          echo "ADBC_QUACK_LIBRARY=$PWD/pkg/quack/libadbc_driver_quack.so" >> "$GITHUB_ENV"
+          python -m pip install --upgrade pip
+          python -m pip install -e . "duckdb>=2.0.0" \
+            "adbc-drivers-validation @ git+https://github.com/adbc-drivers/validation@f0631651f79bd01b67c5776be6fe3b7fbfbe083b"
+
+      - name: Start a DuckDB 2.0 Quack server for validation
+        run: |
+          python scripts/quack_test_server.py --port 9494 --validation > quack-server.log 2>&1 &
+          for i in $(seq 1 30); do grep -q READY quack-server.log && break; sleep 1; done
+          cat quack-server.log
+          grep -q READY quack-server.log
+
+      - name: Run the conformance suite
+        working-directory: validation
+        env:
+          ADBC_QUACK_VALIDATION_URI: quack://127.0.0.1:9494
+          ADBC_QUACK_VALIDATION_TOKEN: adbc-driver-quack-it-token
+        run: python -m pytest -v -rfEsx --junit-xml=validation-report.xml
+
+      - name: Upload the conformance report
+        if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: libadbc_driver_quack-${{ runner.os }}
-          path: pkg/quack/libadbc_driver_quack.*
-          if-no-files-found: error
-
-      - name: Upload test logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: pytest-${{ matrix.os }}-${{ matrix.python }}
-          path: |
-            *.log
-            python/*.log
+          name: validation-report
+          path: validation/validation-report.xml
 
   wheels:
-    # Builds the wheel AND smoke-tests it from a clean venv, so
-    # packaging bugs (wrong-binary-bundled, missing dep, wrong platform
-    # tag, etc.) trip CI before publish — not after a PyPI release.
-    # Runs on every PR / branch / tag push; only publish + release jobs
-    # are tag-gated.
+    # Builds the wheel AND smoke-tests it from a clean venv, so packaging
+    # bugs (wrong binary bundled, missing dependency, wrong platform tag)
+    # trip CI before publish, not after a PyPI release.
     name: Wheel ${{ matrix.os }} ${{ matrix.arch }}
-    needs: [go-test, test]
+    needs: [go-test, test, conformance]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -190,17 +248,25 @@ jobs:
             # problem matcher renders as red "error" annotations.
             extra_cflags: -Wno-dll-attribute-on-redeclaration
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
-          go-version: '1.25'
+          go-version: ${{ env.GO_VERSION }}
           cache: false
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         if: ${{ !matrix.dll_only }}
         with:
-          python-version: '3.12'
+          python-version: '3.14'
+
+      # Linux: build the c-shared library with `zig cc` against glibc 2.17, so
+      # the wheel's manylinux2014 tag (set in setup.py) is true. Built with the
+      # runner's gcc it would need the runner's much newer glibc.
+      - uses: mlugg/setup-zig@v2
+        if: ${{ matrix.goos == 'linux' }}
+        with:
+          version: 0.14.1
 
       - name: Install llvm-mingw (cgo C toolchain for windows/arm64)
         if: ${{ matrix.dll_only }}
@@ -222,36 +288,56 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '1'
-          # Let the macOS wheel install on macOS 12+ rather than only on
-          # the runner's own release (it was tagged macosx_26_0).
-          MACOSX_DEPLOYMENT_TARGET: '12.0'
+          # Go 1.27's oldest supported macOS is 13.0, so the wheel says so (a
+          # macosx_12_0 tag would install where the Go runtime can't run) rather than
+          # the runner's own release.
+          MACOSX_DEPLOYMENT_TARGET: '13.0'
           # Keep cgo's default flags and append per-platform extras
           # (setting CGO_CFLAGS at all replaces the "-O2 -g" default).
           CGO_CFLAGS: -O2 -g ${{ matrix.extra_cflags }}
         run: |
+          if [ "${{ matrix.goos }}" = "linux" ]; then
+            export CC="zig cc -target $([ "${{ matrix.goarch }}" = arm64 ] && echo aarch64 || echo x86_64)-linux-gnu.2.17"
+          fi
           go build -buildmode=c-shared -tags driverlib \
             -o "pkg/quack/libadbc_driver_quack.${{ matrix.ext }}" ./pkg/quack
           echo "ADBC_QUACK_LIBRARY=$PWD/pkg/quack/libadbc_driver_quack.${{ matrix.ext }}" >> "$GITHUB_ENV"
+
+      - name: Check the glibc ceiling (2.17, the manylinux2014 tag)
+        if: ${{ matrix.goos == 'linux' }}
+        run: |
+          MAX=$(objdump -T pkg/quack/libadbc_driver_quack.so | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -1)
+          echo "highest glibc symbol version: ${MAX:-none}"
+          if [ -n "$MAX" ] && [ "$(printf '%s\n2.17\n' "$MAX" | sort -V | tail -1)" != "2.17" ]; then
+            echo "::error::libadbc_driver_quack.so needs glibc $MAX, but the wheel is tagged manylinux2014 (2.17)"
+            exit 1
+          fi
 
       - name: Build wheel
         if: ${{ !matrix.dll_only }}
         shell: bash
         env:
-          MACOSX_DEPLOYMENT_TARGET: '12.0'
+          MACOSX_DEPLOYMENT_TARGET: '13.0'
         run: |
           python -m pip install --upgrade pip build
           python -m build --wheel
           ls -la dist/
+          # The tag must name what the library is: one architecture, and the
+          # macOS floor of the Go toolchain that built it.
+          case "${{ matrix.os }}-${{ matrix.arch }}" in
+            macos-arm64)   want=macosx_13_0_arm64 ;;
+            linux-x86_64)  want=manylinux2014_x86_64 ;;
+            linux-arm64)   want=manylinux2014_aarch64 ;;
+            windows-x86_64) want=win_amd64 ;;
+          esac
+          ls dist/*.whl | grep -q -- "-${want}.whl" || { echo "::error::wheel is not tagged ${want}"; exit 1; }
 
       - name: Smoke-test wheel in a clean venv
         if: ${{ !matrix.dll_only }}
-        # Install the freshly built wheel into a fresh venv (no source
-        # tree on PYTHONPATH) and run the integration suite from a copy
-        # of python/tests/ outside the repo. Catches bugs that the
-        # editable-install path in the `test` job can't see:
-        #   - wrong/missing binary in the wheel (py3-none-any.whl trap)
-        #   - missing runtime dep (pyarrow was once in dbapi extra)
-        #   - import paths broken in installed layout
+        # Install the freshly built wheel into a fresh venv (no source tree
+        # on PYTHONPATH) and run the integration suite from a copy of
+        # python/tests/ outside the repo: catches a wrong or missing binary,
+        # a missing runtime dependency, or a broken installed layout.
         shell: bash
         run: |
           set -e
@@ -266,15 +352,13 @@ jobs:
           "$VPY" -m pip install --upgrade pip --quiet
           WHEEL=$(ls dist/*.whl | head -1)
           echo "Installing $WHEEL plus test dependencies"
-          "$VPY" -m pip install "$WHEEL" pytest "duckdb>=1.5.3" pandas --quiet
-          # Run tests from a copy outside the source tree so the package
-          # has to resolve via the wheel install, not the source dir.
+          "$VPY" -m pip install "$WHEEL" pytest "duckdb>=2.0.0" pandas --quiet
           TESTS="${RUNNER_TEMP}/wheel-smoke-tests"
           rm -rf "$TESTS"
           cp -R python/tests "$TESTS"
+          printf '[pytest]\nmarkers =\n    integration: integration tests\n    hardcharger: needs Hardcharger\n    duckdb_ext: DuckDB extensions\n' > "$TESTS/pytest.ini"
           cd "$TESTS"
-          "$VPY" -m pytest -v -m integration \
-            --override-ini='markers=integration: integration tests' .
+          "$VPY" -m pytest -v -m "integration and not hardcharger" .
 
       - name: Upload wheel artifact
         if: ${{ !matrix.dll_only }}
@@ -301,9 +385,52 @@ jobs:
           name: libadbc_driver_quack-release-${{ matrix.goos }}-${{ matrix.goarch }}
           path: release-artifacts/*
 
+  old-glibc:
+    # The Linux wheels must install and load on a glibc-2.28 distro (RHEL 8
+    # family). Loading the library is the portability check (dlopen fails on
+    # a missing GLIBC_x.y symbol version); a refused connection proves it loaded.
+    name: Wheel on AlmaLinux 8 (${{ matrix.arch }})
+    needs: wheels
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container: almalinux:8
+    steps:
+      - name: Install Python 3.12
+        run: dnf install -y -q python3.12 python3.12-pip
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: wheel-linux-${{ matrix.arch }}
+          path: dist
+
+      - name: Install the wheel and load the driver
+        run: |
+          ldd --version | head -1
+          python3.12 -m venv /tmp/venv
+          /tmp/venv/bin/pip install -q dist/*.whl
+          /tmp/venv/bin/python - <<'PY'
+          import adbc_driver_quack.dbapi as quack
+          try:
+              quack.connect(uri="quack://127.0.0.1:1", db_kwargs={"adbc.quack.token": "nope"}).close()
+          except Exception as e:
+              message = str(e)
+              print(type(e).__name__, message[:300])
+              assert not any(s in message for s in ("GLIBC", "dlopen", "Could not load")), "driver library failed to load"
+              assert "connect" in message.lower() or "refused" in message.lower(), message
+          else:
+              raise SystemExit("expected a refused connection")
+          PY
+
   publish:
     name: Publish to PyPI
-    needs: wheels
+    needs: [wheels, old-glibc]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment:
@@ -331,26 +458,22 @@ jobs:
 
   github-release:
     name: Attach c-shared libraries to GitHub Release
-    needs: wheels
+    needs: [wheels, old-glibc]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
 
       - name: Extract release notes from CHANGELOG.md
-        id: changelog
         run: |
-          # Strip the leading 'v' from the tag (refs/tags/v1.2.3 -> 1.2.3)
-          # and pull the matching "## [VERSION] ..." section out of
-          # CHANGELOG.md (stop at the next "## [" heading). Save to
-          # release_notes.md; fall back to an empty file so the release
-          # still gets created with auto-generated notes.
+          # refs/tags/v1.2.3 -> 1.2.3, then the "## [1.2.3] ..." section up to
+          # the next "## [" heading.
           VERSION="${GITHUB_REF_NAME#v}"
           echo "Extracting release notes for version: ${VERSION}"
           awk -v ver="${VERSION}" '
@@ -358,23 +481,18 @@ jobs:
             found && /^## \[/ { exit }
             found { print }
           ' CHANGELOG.md > release_notes.md
-
-          if [ -s release_notes.md ]; then
-            echo "---- release_notes.md ----"
-            cat release_notes.md
-          else
-            echo "WARNING: no matching CHANGELOG section for ${VERSION}; release will use auto-generated notes."
+          if [ ! -s release_notes.md ]; then
+            echo "::error::no CHANGELOG.md section for ${VERSION}"
+            exit 1
           fi
+          cat release_notes.md
 
       - name: Stage c-shared library bundle
         run: |
           mkdir -p release-bundle
           find artifacts -type d -name 'libadbc_driver_quack-release-*' -exec cp -r {}/. release-bundle/ \;
-          # One combined checksum manifest across every platform.
           (cd release-bundle && find . -type f -name 'libadbc_driver_quack-*' \
-             ! -name '*.sha256' -exec sha256sum {} \; > SHA256SUMS) \
-             || (cd release-bundle && find . -type f -name 'libadbc_driver_quack-*' \
-                  ! -name '*.sha256' -exec shasum -a 256 {} \; > SHA256SUMS)
+             ! -name '*.sha256' -exec sha256sum {} \; > SHA256SUMS)
           ls -la release-bundle/
 
       - name: Attach to GitHub Release
@@ -384,7 +502,6 @@ jobs:
           files: |
             release-bundle/libadbc_driver_quack-*
             release-bundle/SHA256SUMS
-          generate_release_notes: true
           draft: false
 
   pkgsite-warm:
@@ -394,12 +511,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Trigger pkg.go.dev fetch
-        # pkg.go.dev indexes Go modules on demand — the first visitor to
-        # github.com/gizmodata/adbc-driver-quack@<new tag> would otherwise
-        # see the "Fetch" stub page. POSTing to the same fetch endpoint
-        # the page's "Request" button uses warms the cache for everyone.
-        # `|| true` because the endpoint isn't a contractually stable
-        # public API, and pkg.go.dev rate-limits during heavy load.
+        # pkg.go.dev indexes Go modules on demand; POSTing to the fetch
+        # endpoint the page's "Request" button uses warms the cache. `|| true`
+        # because the endpoint isn't a stable public API.
         run: |
           ref="${GITHUB_REF_NAME}"
           curl -sS -X POST \

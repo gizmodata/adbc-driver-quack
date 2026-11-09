@@ -116,7 +116,9 @@ func TestFetchRequestRoundTrip(t *testing.T) {
 	uuid := codec.HugeIntParts{Upper: 0x1122334455667788, Lower: 0x99AABBCCDDEEFF00}
 	original := FetchRequest{
 		Hdr:        MessageHeader{Type: MessageTypeFetchRequest, ConnectionID: "c1", ClientQueryID: 2},
-		ResultUUID: uuid,
+		QueryUUID:  uuid,
+		BatchIndex: 3,
+		AckIndex:   2,
 	}
 	bytes, err := EncodeMessage(original)
 	if err != nil {
@@ -130,8 +132,8 @@ func TestFetchRequestRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected FetchRequest, got %T", decoded)
 	}
-	if !reflect.DeepEqual(fr.ResultUUID, uuid) {
-		t.Errorf("UUID: got %v", fr.ResultUUID)
+	if !reflect.DeepEqual(fr.QueryUUID, uuid) || fr.BatchIndex != 3 || fr.AckIndex != 2 {
+		t.Errorf("got %+v", fr)
 	}
 }
 

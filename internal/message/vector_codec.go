@@ -20,7 +20,42 @@ const (
 	VectorTypeConstant   VectorType = 2
 	VectorTypeDictionary VectorType = 3
 	VectorTypeSequence   VectorType = 4
+	VectorTypeShredded   VectorType = 5
 )
+
+// readSplitStrings reads DuckDB 2.0's VARCHAR layout (storage version
+// V2_0_0): field 107 is the total byte length, 108 a blob of count
+// little-endian uint32 lengths (0 for NULL rows), 109 the concatenated
+// bytes of the non-NULL strings.
+func readSplitStrings(r *codec.BinaryReader, count int) [][]byte {
+	byteLen := codec.ReadRequiredField(r, 107, func(rr *codec.BinaryReader) uint64 { return rr.ReadULEB128() })
+	lengths := codec.ReadRequiredField(r, 108, func(rr *codec.BinaryReader) []byte { return rr.ReadBlob() })
+	data := codec.ReadRequiredField(r, 109, func(rr *codec.BinaryReader) []byte { return rr.ReadBlob() })
+	if r.Err() != nil {
+		return nil
+	}
+	if len(lengths) != 4*count || uint64(len(data)) != byteLen {
+		r.Fail(fmt.Errorf("message: VARCHAR vector: %d length bytes for %d rows, %d data bytes (header says %d)",
+			len(lengths), count, len(data), byteLen))
+		return nil
+	}
+	out := make([][]byte, count)
+	pos := 0
+	for i := 0; i < count; i++ {
+		n := int(binary.LittleEndian.Uint32(lengths[4*i:]))
+		if n > len(data)-pos {
+			r.Fail(fmt.Errorf("message: VARCHAR vector: string %d overruns the data blob", i))
+			return nil
+		}
+		out[i] = data[pos : pos+n : pos+n]
+		pos += n
+	}
+	if pos != len(data) {
+		r.Fail(fmt.Errorf("message: VARCHAR vector: %d trailing data bytes", len(data)-pos))
+		return nil
+	}
+	return out
+}
 
 // ErrUnsupportedVector signals an encoding we don't (yet) handle.
 var ErrUnsupportedVector = errors.New("message: unsupported vector encoding")
@@ -46,14 +81,14 @@ func DecodeDataChunk(r *codec.BinaryReader) DataChunk {
 		columns := codec.ReadRequiredField(rr, 102, func(rrr *codec.BinaryReader) []DecodedVector {
 			return codec.ReadList(rrr, func(i int, rrrr *codec.BinaryReader) DecodedVector {
 				if i >= len(types) {
-					rrrr.AssertEOF() // force error
+					rrrr.Fail(errors.New("message: DataChunk has more columns than types"))
 					return nil
 				}
 				return DecodeVector(rrrr, types[i], rowCount)
 			})
 		})
 		if len(columns) != len(types) {
-			rr.AssertEOF()
+			rr.Fail(fmt.Errorf("message: DataChunk has %d columns for %d types", len(columns), len(types)))
 		}
 		return DataChunk{RowCount: rowCount, Types: types, Columns: columns}
 	})
@@ -74,8 +109,7 @@ func decodeVectorBody(r *codec.BinaryReader, t quacktype.LogicalType, count int)
 	case VectorTypeFlat:
 		return decodeFlatVector(r, t, count)
 	case VectorTypeFSST:
-		// store a sentinel error in the reader's sticky path
-		r.AssertEOF()
+		r.Fail(fmt.Errorf("%w: FSST-compressed vector", ErrUnsupportedVector))
 		return nil
 	case VectorTypeConstant:
 		// nested decode of single value, then broadcast
@@ -96,8 +130,13 @@ func decodeVectorBody(r *codec.BinaryReader, t quacktype.LogicalType, count int)
 		start := codec.ReadRequiredField(r, 91, func(rr *codec.BinaryReader) int64 { return rr.ReadSLEB128() })
 		incr := codec.ReadRequiredField(r, 92, func(rr *codec.BinaryReader) int64 { return rr.ReadSLEB128() })
 		return sequenceVector(t, count, start, incr)
+	case VectorTypeShredded:
+		// A VARIANT read from shredded storage (DuckDB 2.0). Unshredding
+		// needs DuckDB's variant machinery; ask for a cast instead.
+		r.Fail(fmt.Errorf("%w: shredded VARIANT vector; cast the column to JSON or VARCHAR in the query", ErrUnsupportedVector))
+		return nil
 	}
-	r.AssertEOF()
+	r.Fail(fmt.Errorf("%w: vector type %d", ErrUnsupportedVector, vectorType))
 	return nil
 }
 
@@ -118,7 +157,7 @@ func decodeFlatVector(r *codec.BinaryReader, t quacktype.LogicalType, count int)
 		byteLen := physical.ByteWidth() * count
 		bytes := codec.ReadRequiredField(r, 102, func(rr *codec.BinaryReader) []byte { return rr.ReadBlob() })
 		if len(bytes) != byteLen {
-			r.AssertEOF()
+			r.Fail(fmt.Errorf("message: %v vector: %d data bytes, want %d", t.ID, len(bytes), byteLen))
 			return nil
 		}
 		return decodeFixedFlatVector(t, physical, bytes, count, validity)
@@ -126,9 +165,17 @@ func decodeFlatVector(r *codec.BinaryReader, t quacktype.LogicalType, count int)
 
 	switch physical {
 	case quacktype.PhysicalTypeVarchar:
-		raw := codec.ReadRequiredField(r, 102, func(rr *codec.BinaryReader) [][]byte {
-			return codec.ReadList(rr, func(_ int, rrr *codec.BinaryReader) []byte { return rrr.ReadStringBytes() })
-		})
+		var raw [][]byte
+		if !r.EOF() && r.PeekFieldID() == 107 {
+			raw = readSplitStrings(r, count)
+		} else {
+			raw = codec.ReadRequiredField(r, 102, func(rr *codec.BinaryReader) [][]byte {
+				return codec.ReadList(rr, func(_ int, rrr *codec.BinaryReader) []byte { return rrr.ReadStringBytes() })
+			})
+		}
+		if r.Err() != nil {
+			return nil
+		}
 		values := make([]interface{}, len(raw))
 		for i, b := range raw {
 			if ValidityIsValid(validity, i) {
@@ -141,7 +188,7 @@ func decodeFlatVector(r *codec.BinaryReader, t quacktype.LogicalType, count int)
 		childVecs := codec.ReadRequiredField(r, 103, func(rr *codec.BinaryReader) []DecodedVector {
 			return codec.ReadList(rr, func(i int, rrr *codec.BinaryReader) DecodedVector {
 				if i >= len(children) {
-					rrr.AssertEOF()
+					rrr.Fail(errors.New("message: STRUCT vector has more children than its type"))
 					return nil
 				}
 				return DecodeVector(rrr, children[i].Type, count)
@@ -153,9 +200,9 @@ func decodeFlatVector(r *codec.BinaryReader, t quacktype.LogicalType, count int)
 				continue
 			}
 			rowMap := make(map[string]interface{}, len(children))
-			for c, child := range children {
+			for c := range children {
 				if c < len(childVecs) && childVecs[c] != nil {
-					rowMap[child.Name] = childVecs[c].GetObject(row)
+					rowMap[quacktype.StructFieldKey(children, c)] = childVecs[c].GetObject(row)
 				}
 			}
 			values[row] = rowMap
@@ -186,7 +233,7 @@ func decodeFlatVector(r *codec.BinaryReader, t quacktype.LogicalType, count int)
 		arrSize := codec.ReadRequiredField(r, 103, func(rr *codec.BinaryReader) int { return rr.ReadULEB128Int() })
 		expected, _ := quacktype.GetArraySize(t)
 		if arrSize != expected {
-			r.AssertEOF()
+			r.Fail(fmt.Errorf("message: ARRAY vector size %d, type says %d", arrSize, expected))
 			return nil
 		}
 		childType, _ := quacktype.GetChildType(t)
@@ -207,7 +254,7 @@ func decodeFlatVector(r *codec.BinaryReader, t quacktype.LogicalType, count int)
 		}
 		return ObjectVec{TypeRef: t, Values: values}
 	}
-	r.AssertEOF()
+	r.Fail(fmt.Errorf("%w: physical type %d", ErrUnsupportedVector, physical))
 	return nil
 }
 
@@ -220,7 +267,7 @@ func needsObjectMaterialization(t quacktype.LogicalType, physical quacktype.Phys
 		quacktype.LogicalTypeIDTime, quacktype.LogicalTypeIDTimeNS, quacktype.LogicalTypeIDTimeTZ,
 		quacktype.LogicalTypeIDTimestamp, quacktype.LogicalTypeIDTimestampSec,
 		quacktype.LogicalTypeIDTimestampMS, quacktype.LogicalTypeIDTimestampNS,
-		quacktype.LogicalTypeIDTimestampTZ,
+		quacktype.LogicalTypeIDTimestampTZ, quacktype.LogicalTypeIDTimestampTZNS,
 		quacktype.LogicalTypeIDUUID, quacktype.LogicalTypeIDInterval,
 		quacktype.LogicalTypeIDHugeInt, quacktype.LogicalTypeIDUHugeInt,
 		quacktype.LogicalTypeIDEnum:
@@ -385,8 +432,8 @@ func decodeInt64LogicalValue(t quacktype.LogicalType, value int64) interface{} {
 		return time.UnixMilli(value).UTC()
 	case quacktype.LogicalTypeIDTimestamp:
 		return time.UnixMicro(value).UTC()
-	case quacktype.LogicalTypeIDTimestampNS:
-		return time.Unix(value/1_000_000_000, value%1_000_000_000).UTC()
+	case quacktype.LogicalTypeIDTimestampNS, quacktype.LogicalTypeIDTimestampTZNS:
+		return time.Unix(0, value).UTC()
 	case quacktype.LogicalTypeIDTimestampTZ:
 		return time.UnixMicro(value).UTC()
 	case quacktype.LogicalTypeIDDecimal:
@@ -689,7 +736,7 @@ func readSelectionVector(r *codec.BinaryReader, count int) []int32 {
 	expected := count * 4
 	bytes := r.ReadBlob()
 	if len(bytes) != expected {
-		r.AssertEOF()
+		r.Fail(fmt.Errorf("message: %d bytes, want %d", len(bytes), expected))
 		return nil
 	}
 	out := make([]int32, count)
@@ -703,7 +750,7 @@ func readValidityMask(r *codec.BinaryReader, count int) []uint64 {
 	expected := ValidityWireByteCount(count)
 	bytes := r.ReadBlob()
 	if len(bytes) != expected {
-		r.AssertEOF()
+		r.Fail(fmt.Errorf("message: %d bytes, want %d", len(bytes), expected))
 		return nil
 	}
 	return ValidityFromBytes(bytes, count)
@@ -719,7 +766,7 @@ func readListEntries(r *codec.BinaryReader, count int) []listEntry {
 		return v
 	})
 	if len(entries) != count {
-		r.AssertEOF()
+		r.Fail(fmt.Errorf("message: %d list entries for %d rows", len(entries), count))
 		return nil
 	}
 	return entries

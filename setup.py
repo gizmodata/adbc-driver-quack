@@ -43,7 +43,7 @@ class BinaryWheel(bdist_wheel):
 
     Our bundled c-shared library isn't a CPython extension — it's an
     arbitrary native lib loaded via ``ctypes`` / ``adbc_driver_manager``.
-    Any CPython 3.10+ can load it. Without this override, setuptools
+    Any CPython 3.11+ can load it. Without this override, setuptools
     would tag each wheel with the Python ABI of the build host
     (e.g. ``cp314-cp314-macosx_..``), which means we'd need
     5 Pythons × 4 platforms = 20 wheels per release. With it, we need
@@ -62,6 +62,13 @@ class BinaryWheel(bdist_wheel):
             plat = "manylinux2014_x86_64"
         elif plat == "linux_aarch64":
             plat = "manylinux2014_aarch64"
+        elif plat.startswith("macosx_") and plat.endswith("_universal2"):
+            # The build Python is often a universal2 binary, but the Go
+            # library inside is built for this machine's architecture only:
+            # a universal2 tag would install on an Intel Mac and fail to load.
+            import platform
+
+            plat = plat[: -len("universal2")] + platform.machine()
         return ("py3", "none", plat)
 
 

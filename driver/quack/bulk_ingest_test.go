@@ -47,7 +47,7 @@ func TestBuildCreateTableSQLModes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := buildCreateTableSQL("", "bulk_ingest", intSchema(), tc.ifNotExists, tc.orReplace, tc.temporary)
+			got, err := buildCreateTableSQL("", "", "bulk_ingest", intSchema(), tc.ifNotExists, tc.orReplace, tc.temporary)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -64,7 +64,7 @@ func TestBuildCreateTableSQLSchemaAndQuoting(t *testing.T) {
 		{Name: `od"d`, Type: arrow.PrimitiveTypes.Int32, Nullable: true},
 		{Name: "not null col", Type: arrow.BinaryTypes.String, Nullable: false},
 	}, nil)
-	got, err := buildCreateTableSQL("my schema", "tbl", s, false, false, false)
+	got, err := buildCreateTableSQL("", "my schema", "tbl", s, false, false, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -75,19 +75,18 @@ func TestBuildCreateTableSQLSchemaAndQuoting(t *testing.T) {
 }
 
 func TestBuildCreateTableSQLErrors(t *testing.T) {
-	if _, err := buildCreateTableSQL("", "", intSchema(), false, false, false); err == nil {
+	if _, err := buildCreateTableSQL("", "", "", intSchema(), false, false, false); err == nil {
 		t.Fatal("expected error for empty target table")
 	}
 	bad := arrow.NewSchema([]arrow.Field{
-		{Name: "d", Type: &arrow.DurationType{Unit: arrow.Second}, Nullable: true},
+		{Name: "u", Type: arrow.DenseUnionOf([]arrow.Field{{Name: "i", Type: arrow.PrimitiveTypes.Int32}}, []arrow.UnionTypeCode{0}), Nullable: true},
 	}, nil)
-	if _, err := buildCreateTableSQL("", "t", bad, false, false, false); err == nil {
+	if _, err := buildCreateTableSQL("", "", "t", bad, false, false, false); err == nil {
 		t.Fatal("expected error for unsupported arrow type")
 	}
 }
 
-// duckDBTypeForArrow must stay in lockstep with logicalTypeForArrow:
-// every type creatable in DDL must also be ingestable by the encoder.
+// duckDBTypeForArrow mirrors DuckDB 2.0's own Arrow import mapping.
 func TestDuckDBTypeForArrow(t *testing.T) {
 	cases := []struct {
 		dt   arrow.DataType
@@ -109,7 +108,19 @@ func TestDuckDBTypeForArrow(t *testing.T) {
 		{arrow.BinaryTypes.Binary, "BLOB"},
 		{arrow.FixedWidthTypes.Date32, "DATE"},
 		{&arrow.TimestampType{Unit: arrow.Microsecond}, "TIMESTAMP"},
-		{&arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}, "TIMESTAMP WITH TIME ZONE"},
+		{&arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}, "TIMESTAMPTZ"},
+		{&arrow.TimestampType{Unit: arrow.Nanosecond, TimeZone: "UTC"}, "TIMESTAMPTZ_NS"},
+		{&arrow.TimestampType{Unit: arrow.Second}, "TIMESTAMP_S"},
+		{&arrow.TimestampType{Unit: arrow.Millisecond}, "TIMESTAMP_MS"},
+		{&arrow.TimestampType{Unit: arrow.Nanosecond}, "TIMESTAMP_NS"},
+		{arrow.FixedWidthTypes.Time64ns, "TIME_NS"},
+		{arrow.FixedWidthTypes.Time32ms, "TIME"},
+		{arrow.FixedWidthTypes.Duration_us, "INTERVAL"},
+		{arrow.BinaryTypes.StringView, "VARCHAR"},
+		{arrow.ListOf(arrow.PrimitiveTypes.Int32), "INTEGER[]"},
+		{arrow.FixedSizeListOf(3, arrow.PrimitiveTypes.Float64), "DOUBLE[3]"},
+		{arrow.MapOf(arrow.BinaryTypes.String, arrow.PrimitiveTypes.Int64), "MAP(VARCHAR, BIGINT)"},
+		{arrow.StructOf(arrow.Field{Name: "a b", Type: arrow.PrimitiveTypes.Int16}), `STRUCT("a b" SMALLINT)`},
 		{&arrow.Decimal128Type{Precision: 38, Scale: 4}, "DECIMAL(38, 4)"},
 	}
 	for _, tc := range cases {

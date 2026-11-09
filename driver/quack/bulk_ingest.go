@@ -2,17 +2,18 @@ package quack
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/apache/arrow-adbc/go/adbc"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/arrow/decimal128"
 
 	"github.com/gizmodata/adbc-driver-quack/internal/message"
-	"github.com/gizmodata/adbc-driver-quack/internal/quacktype"
 	"github.com/gizmodata/adbc-driver-quack/internal/transport"
 )
 
@@ -64,51 +65,290 @@ func (s *statementImpl) executeIngest(ctx context.Context) (int64, error) {
 	}
 	defer s.clearBound()
 
-	// The bound schema is needed up front for the CREATE-family modes so
-	// the table DDL is built before the first APPEND_REQUEST.
-	var ddlSchema *arrow.Schema
+	var schema *arrow.Schema
 	if s.bound != nil {
-		ddlSchema = s.bound.Schema()
+		schema = s.bound.Schema()
 	} else {
-		ddlSchema = s.boundStream.Schema()
+		schema = s.boundStream.Schema()
 	}
-	if err := s.prepareIngestTarget(ctx, ddlSchema); err != nil {
+	cols := make([]ingestColumn, schema.NumFields())
+	for i, f := range schema.Fields() {
+		c, err := duckColumnForField(f)
+		if err != nil {
+			return -1, errStatus(adbc.StatusNotImplemented, "ingest: column %q: %v", f.Name, err)
+		}
+		cols[i] = c
+	}
+	target, err := s.resolveIngestTarget(ctx)
+	if err != nil {
+		return -1, err
+	}
+	if err := s.prepareIngestTarget(ctx, schema, target); err != nil {
+		return -1, err
+	}
+	return s.streamIngest(ctx, cols, target)
+}
+
+// ingestBatchBytes is the target size of one SEND_DATA request: several
+// 2048-row chunks per round trip, small enough to stay well inside any
+// proxy's body limit.
+const ingestBatchBytes = 4 << 20
+
+// streamIngest runs
+//
+//	INSERT INTO <target> SELECT * FROM scan_data_from_quack_client(<stream>, NULL::STRUCT(...), ordered := true)
+//
+// and streams the bound rows into it with SEND_DATA, the way DuckDB's own
+// quack client inserts into an attached table. The statement is planned
+// before any data moves (PREPARE with inline_rows = 0), the terminal
+// SEND_DATA carries the batch count so a lost batch fails the statement,
+// and the inserted row count comes back as the statement's result.
+func (s *statementImpl) streamIngest(ctx context.Context, cols []ingestColumn, target ingestTarget) (int64, error) {
+	sess := s.conn.sess
+	streamID := newStreamID()
+	proto := make([]string, len(cols))
+	for i, c := range cols {
+		proto[i] = fmt.Sprintf("col%d %s", i, c.sql)
+	}
+	insert := fmt.Sprintf("INSERT INTO %s SELECT * FROM scan_data_from_quack_client(%s, NULL::STRUCT(%s), ordered := true)",
+		target.name(), quoteLiteral(streamID), strings.Join(proto, ", "))
+	cur, err := sess.prepare(ctx, insert, message.SomeIndex(0))
+	if err != nil {
+		return -1, ingestError(err)
+	}
+	defer cur.close()
+
+	fail := func(err error) (int64, error) {
+		// Release the server-side statement promptly: it is waiting for
+		// batches that will never come.
+		cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = sess.cancelQuery(cctx, cur.queryUUID)
+		cancel()
 		return -1, err
 	}
 
-	var total int64
+	var (
+		pending      []message.DataChunk
+		pendingBytes int64
+		batches      uint64
+	)
+	flush := func() error {
+		if len(pending) == 0 {
+			return nil
+		}
+		batches++
+		err := sess.sendData(ctx, streamID, message.SomeIndex(batches), message.OptionalIndex{}, pending)
+		pending, pendingBytes = nil, 0
+		return err
+	}
 	pump := func(rec arrow.Record) error {
-		chunk, err := chunkFromRecord(rec)
+		chunks, size, err := encodeRecordChunks(rec, cols)
 		if err != nil {
-			return err
+			return errStatus(adbc.StatusInvalidArgument, "ingest: %v", err)
 		}
-		if err := s.conn.sess.appendChunk(ctx, s.targetSchema, s.targetTable, chunk); err != nil {
-			return fromTransportError(err)
+		for i := range chunks {
+			pending = append(pending, chunks[i])
+			pendingBytes += int64(len(chunks[i].Raw))
+			if pendingBytes >= ingestBatchBytes {
+				if err := flush(); err != nil {
+					return ingestError(err)
+				}
+			}
 		}
-		total += rec.NumRows()
+		_ = size
 		return nil
 	}
-
 	if s.bound != nil {
 		if err := pump(s.bound); err != nil {
-			return -1, err
+			return fail(err)
 		}
 	}
 	if s.boundStream != nil {
 		for s.boundStream.Next() {
 			if err := pump(s.boundStream.Record()); err != nil {
-				return -1, err
+				return fail(err)
 			}
 		}
 		if err := s.boundStream.Err(); err != nil {
-			return -1, errStatus(adbc.StatusIO, "ingest stream: %v", err)
+			return fail(errStatus(adbc.StatusIO, "ingest stream: %v", err))
 		}
 	}
-	return total, nil
+	if err := flush(); err != nil {
+		return fail(ingestError(err))
+	}
+	if err := sess.sendData(ctx, streamID, message.OptionalIndex{}, message.SomeIndex(batches), nil); err != nil {
+		return fail(ingestError(err))
+	}
+	chunks, err := cur.drainAll(ctx)
+	if err != nil {
+		return -1, ingestError(err)
+	}
+	// PREPARE answered before the INSERT bound its result (it was waiting
+	// for our batches), so the cursor has no column names: the result is
+	// DuckDB's one-row "Count".
+	names := cur.columnNamesSlice()
+	if len(names) == 0 {
+		names = []string{"Count"}
+	}
+	return countFromChunks(names, chunks), nil
+}
+
+// ingestError maps a failure of the ingest INSERT. A Binder error there
+// means the table exists (a missing table is a Catalog error, NOT_FOUND)
+// but cannot take the bound columns, which ADBC reports as ALREADY_EXISTS.
+// The server can raise it from PREPARE, a SEND_DATA or the final FETCH:
+// PREPARE answers as soon as the client-data scan binds, before the INSERT
+// checks its columns.
+func ingestError(err error) error {
+	var se *transport.ErrServerError
+	if errors.As(err, &se) && strings.EqualFold(se.ExceptionType, "Binder") {
+		return adbc.Error{Code: adbc.StatusAlreadyExists, SqlState: sqlState("42S01"),
+			Msg: "ingest: the bound data does not match the existing table: " + se.Error()}
+	}
+	return fromTransportError(err)
+}
+
+// ingestTarget is the fully qualified table an ingest writes.
+type ingestTarget struct {
+	catalog, schema, table string
+	temporary              bool
+}
+
+func (t ingestTarget) name() string {
+	return quoteIdent(t.catalog) + "." + quoteIdent(t.schema) + "." + quoteIdent(t.table)
+}
+
+// resolveIngestTarget qualifies the target fully. An unqualified name is
+// ambiguous in DuckDB once a temporary table of the same name exists (it
+// resolves to the temporary one), so a non-temporary ingest names the
+// session's current catalog and schema, and a temporary one temp.main.
+func (s *statementImpl) resolveIngestTarget(ctx context.Context) (ingestTarget, error) {
+	t := ingestTarget{catalog: s.targetCatalog, schema: s.targetSchema, table: s.targetTable, temporary: s.ingestTemporary}
+	if t.temporary {
+		if t.catalog != "" || t.schema != "" {
+			return t, errStatus(adbc.StatusInvalidArgument,
+				"ingest: a temporary table cannot have a target catalog or schema (DuckDB keeps it in temp.main)")
+		}
+		t.catalog, t.schema = "temp", "main"
+		return t, nil
+	}
+	if t.catalog != "" && t.schema != "" {
+		return t, nil
+	}
+	result, err := s.conn.sess.drainPrepared(ctx, "SELECT current_database(), current_schema()")
+	if err != nil {
+		return t, fromTransportError(err)
+	}
+	for _, ch := range result.Chunks {
+		if ch.RowCount == 1 && len(ch.Columns) == 2 {
+			if t.catalog == "" {
+				t.catalog, _ = ch.Columns[0].GetObject(0).(string)
+			}
+			if t.schema == "" {
+				t.schema, _ = ch.Columns[1].GetObject(0).(string)
+			}
+		}
+	}
+	if t.catalog == "" || t.schema == "" {
+		return t, errStatus(adbc.StatusInternal, "ingest: could not resolve the current catalog and schema")
+	}
+	return t, nil
+}
+
+func newStreamID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(fmt.Sprintf("crypto/rand: %v", err))
+	}
+	return hex.EncodeToString(b[:])
+}
+
+func quoteLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+// isDMLStatement reports whether sql (after leading comments and
+// whitespace, and a WITH clause) is INSERT/UPDATE/DELETE/MERGE, whose
+// one-row "Count" result is a rows-affected count rather than data.
+func isDMLStatement(sql string) bool {
+	s := strings.TrimSpace(sql)
+	for {
+		switch {
+		case strings.HasPrefix(s, "--"):
+			if i := strings.IndexByte(s, '\n'); i >= 0 {
+				s = strings.TrimSpace(s[i+1:])
+				continue
+			}
+			return false
+		case strings.HasPrefix(s, "/*"):
+			if i := strings.Index(s, "*/"); i >= 0 {
+				s = strings.TrimSpace(s[i+2:])
+				continue
+			}
+			return false
+		}
+		break
+	}
+	upper := strings.ToUpper(s)
+	for _, kw := range []string{"INSERT", "UPDATE", "DELETE", "MERGE"} {
+		if strings.HasPrefix(upper, kw) && (len(upper) == len(kw) || !isIdentChar(upper[len(kw)])) {
+			return true
+		}
+	}
+	if strings.HasPrefix(upper, "WITH") {
+		// WITH ... INSERT/UPDATE/DELETE: look for the DML keyword after the CTEs.
+		for _, kw := range []string{") INSERT", ") UPDATE", ") DELETE", ") MERGE", ")INSERT", ")UPDATE", ")DELETE", ")MERGE"} {
+			if strings.Contains(upper, kw) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isIdentChar(c byte) bool {
+	return c == '_' || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+// countFromChunks reads the rows-affected count from a DML result: DuckDB
+// answers INSERT/UPDATE/DELETE with one BIGINT column named "Count".
+// Anything else (DDL, a query, RETURNING rows) reports -1, "unknown", per
+// ADBC.
+func countFromChunks(names []string, chunks []message.DataChunk) int64 {
+	if len(names) != 1 || !strings.EqualFold(names[0], "Count") {
+		return -1
+	}
+	var total int64
+	seen := false
+	for _, c := range chunks {
+		if c.RowCount == 0 {
+			continue
+		}
+		if len(c.Columns) != 1 {
+			return -1
+		}
+		for r := 0; r < c.RowCount; r++ {
+			switch v := c.Columns[0].GetObject(r).(type) {
+			case int64:
+				total += v
+			case int32:
+				total += int64(v)
+			case uint64:
+				total += int64(v)
+			default:
+				return -1
+			}
+			seen = true
+		}
+	}
+	if !seen {
+		return -1
+	}
+	return total
 }
 
 // prepareIngestTarget runs the table DDL (if any) implied by the ingest
-// mode before the append loop, mirroring DuckDB's own ADBC driver:
+// mode before the rows stream, mirroring DuckDB's own ADBC driver:
 //
 //	create        → CREATE TABLE              (error if it exists)
 //	append        → no DDL                    (append fails if missing)
@@ -116,7 +356,7 @@ func (s *statementImpl) executeIngest(ctx context.Context) (int64, error) {
 //	create_append → CREATE TABLE IF NOT EXISTS (create only if missing)
 //
 // The ADBC default when no mode is set is "create".
-func (s *statementImpl) prepareIngestTarget(ctx context.Context, schema *arrow.Schema) error {
+func (s *statementImpl) prepareIngestTarget(ctx context.Context, schema *arrow.Schema, target ingestTarget) error {
 	mode := s.ingestMode
 	if mode == "" {
 		mode = adbc.OptionValueIngestModeCreate
@@ -124,24 +364,20 @@ func (s *statementImpl) prepareIngestTarget(ctx context.Context, schema *arrow.S
 	if mode == adbc.OptionValueIngestModeAppend {
 		return nil
 	}
+	catalog, dbSchema := target.catalog, target.schema
+	if target.temporary {
+		catalog, dbSchema = "", "" // CREATE TEMPORARY TABLE puts it in temp.main
+	}
 	ddl, err := buildCreateTableSQL(
-		s.targetSchema, s.targetTable, schema,
+		catalog, dbSchema, target.table, schema,
 		mode == adbc.OptionValueIngestModeCreateAppend, // IF NOT EXISTS
 		mode == adbc.OptionValueIngestModeReplace,      // OR REPLACE
-		s.ingestTemporary,
+		target.temporary,
 	)
 	if err != nil {
 		return errStatus(adbc.StatusInvalidArgument, "ingest: %v", err)
 	}
 	if _, err := s.conn.sess.drainPrepared(ctx, ddl); err != nil {
-		// "create" against an existing table is ALREADY_EXISTS per the
-		// ADBC contract; every other DDL failure is reported as-is.
-		if mode == adbc.OptionValueIngestModeCreate {
-			var se *transport.ErrServerError
-			if errors.As(err, &se) && strings.Contains(strings.ToLower(se.Message), "already exists") {
-				return adbc.Error{Code: adbc.StatusAlreadyExists, Msg: se.Message}
-			}
-		}
 		return fromTransportError(err)
 	}
 	return nil
@@ -150,7 +386,7 @@ func (s *statementImpl) prepareIngestTarget(ctx context.Context, schema *arrow.S
 // buildCreateTableSQL renders a DuckDB CREATE TABLE statement from an
 // Arrow schema. orReplace and ifNotExists are mutually exclusive (the
 // ingest modes never set both); DuckDB rejects the combination anyway.
-func buildCreateTableSQL(schema, table string, s *arrow.Schema, ifNotExists, orReplace, temporary bool) (string, error) {
+func buildCreateTableSQL(catalog, schema, table string, s *arrow.Schema, ifNotExists, orReplace, temporary bool) (string, error) {
 	if table == "" {
 		return "", fmt.Errorf("no target table set")
 	}
@@ -166,7 +402,11 @@ func buildCreateTableSQL(schema, table string, s *arrow.Schema, ifNotExists, orR
 	if ifNotExists {
 		b.WriteString("IF NOT EXISTS ")
 	}
-	if schema != "" {
+	if catalog != "" && !temporary {
+		b.WriteString(quoteIdent(catalog))
+		b.WriteByte('.')
+	}
+	if schema != "" && !temporary {
 		b.WriteString(quoteIdent(schema))
 		b.WriteByte('.')
 	}
@@ -176,10 +416,11 @@ func buildCreateTableSQL(schema, table string, s *arrow.Schema, ifNotExists, orR
 		if i > 0 {
 			b.WriteString(", ")
 		}
-		colType, err := duckDBTypeForArrow(f.Type)
+		col, err := duckColumnForField(f)
 		if err != nil {
 			return "", fmt.Errorf("column %q: %w", f.Name, err)
 		}
+		colType := col.sql
 		b.WriteString(quoteIdent(f.Name))
 		b.WriteByte(' ')
 		b.WriteString(colType)
@@ -197,256 +438,11 @@ func quoteIdent(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
-// duckDBTypeForArrow is the SQL-type printer for CREATE TABLE DDL. It
-// covers exactly the Arrow types logicalTypeForArrow accepts on the
-// encoder side, so a creatable schema is always an ingestable one.
+// duckDBTypeForArrow is the SQL type a CREATE TABLE gives an Arrow column.
 func duckDBTypeForArrow(dt arrow.DataType) (string, error) {
-	switch dt.ID() {
-	case arrow.BOOL:
-		return "BOOLEAN", nil
-	case arrow.INT8:
-		return "TINYINT", nil
-	case arrow.INT16:
-		return "SMALLINT", nil
-	case arrow.INT32:
-		return "INTEGER", nil
-	case arrow.INT64:
-		return "BIGINT", nil
-	case arrow.UINT8:
-		return "UTINYINT", nil
-	case arrow.UINT16:
-		return "USMALLINT", nil
-	case arrow.UINT32:
-		return "UINTEGER", nil
-	case arrow.UINT64:
-		return "UBIGINT", nil
-	case arrow.FLOAT32:
-		return "FLOAT", nil
-	case arrow.FLOAT64:
-		return "DOUBLE", nil
-	case arrow.STRING, arrow.LARGE_STRING:
-		return "VARCHAR", nil
-	case arrow.BINARY, arrow.LARGE_BINARY:
-		return "BLOB", nil
-	case arrow.DATE32:
-		return "DATE", nil
-	case arrow.TIMESTAMP:
-		if dt.(*arrow.TimestampType).TimeZone != "" {
-			return "TIMESTAMP WITH TIME ZONE", nil
-		}
-		return "TIMESTAMP", nil
-	case arrow.DECIMAL128:
-		d := dt.(*arrow.Decimal128Type)
-		return fmt.Sprintf("DECIMAL(%d, %d)", d.Precision, d.Scale), nil
+	c, err := duckColumnForArrow(dt)
+	if err != nil {
+		return "", err
 	}
-	return "", fmt.Errorf("unsupported arrow type %s for ingest", dt)
-}
-
-// chunkFromRecord converts an arrow.Record into a Quack DataChunk.
-//
-// Only scalar primitive + string + binary types are supported in the
-// initial pass. Decimal128 and Date32 and Timestamp_us are also
-// implemented because they are common in bulk-load workloads. Nested
-// types are not yet supported on the encoder side.
-func chunkFromRecord(rec arrow.Record) (message.DataChunk, error) {
-	schema := rec.Schema()
-	rowCount := int(rec.NumRows())
-	types := make([]quacktype.LogicalType, schema.NumFields())
-	cols := make([]message.DecodedVector, schema.NumFields())
-	for i := 0; i < schema.NumFields(); i++ {
-		field := schema.Field(i)
-		t, err := logicalTypeForArrow(field.Type)
-		if err != nil {
-			return message.DataChunk{}, fmt.Errorf("column %q: %w", field.Name, err)
-		}
-		types[i] = t
-		v, err := decodedVectorForArrow(t, rec.Column(i), rowCount)
-		if err != nil {
-			return message.DataChunk{}, fmt.Errorf("column %q: %w", field.Name, err)
-		}
-		cols[i] = v
-	}
-	return message.DataChunk{RowCount: rowCount, Types: types, Columns: cols}, nil
-}
-
-func logicalTypeForArrow(dt arrow.DataType) (quacktype.LogicalType, error) {
-	switch dt.ID() {
-	case arrow.BOOL:
-		return quacktype.Of(quacktype.LogicalTypeIDBoolean), nil
-	case arrow.INT8:
-		return quacktype.Of(quacktype.LogicalTypeIDTinyInt), nil
-	case arrow.INT16:
-		return quacktype.Of(quacktype.LogicalTypeIDSmallInt), nil
-	case arrow.INT32:
-		return quacktype.Of(quacktype.LogicalTypeIDInteger), nil
-	case arrow.INT64:
-		return quacktype.Of(quacktype.LogicalTypeIDBigInt), nil
-	case arrow.UINT8:
-		return quacktype.Of(quacktype.LogicalTypeIDUTinyInt), nil
-	case arrow.UINT16:
-		return quacktype.Of(quacktype.LogicalTypeIDUSmallInt), nil
-	case arrow.UINT32:
-		return quacktype.Of(quacktype.LogicalTypeIDUInteger), nil
-	case arrow.UINT64:
-		return quacktype.Of(quacktype.LogicalTypeIDUBigInt), nil
-	case arrow.FLOAT32:
-		return quacktype.Of(quacktype.LogicalTypeIDFloat), nil
-	case arrow.FLOAT64:
-		return quacktype.Of(quacktype.LogicalTypeIDDouble), nil
-	case arrow.STRING, arrow.LARGE_STRING:
-		return quacktype.Of(quacktype.LogicalTypeIDVarchar), nil
-	case arrow.BINARY, arrow.LARGE_BINARY:
-		return quacktype.Of(quacktype.LogicalTypeIDBlob), nil
-	case arrow.DATE32:
-		return quacktype.Of(quacktype.LogicalTypeIDDate), nil
-	case arrow.TIMESTAMP:
-		ts := dt.(*arrow.TimestampType)
-		if ts.TimeZone != "" {
-			return quacktype.Of(quacktype.LogicalTypeIDTimestampTZ), nil
-		}
-		return quacktype.Of(quacktype.LogicalTypeIDTimestamp), nil
-	case arrow.DECIMAL128:
-		d := dt.(*arrow.Decimal128Type)
-		return quacktype.Decimal(int(d.Precision), int(d.Scale)), nil
-	}
-	return quacktype.LogicalType{}, fmt.Errorf("unsupported arrow type %s for ingest", dt)
-}
-
-func decodedVectorForArrow(t quacktype.LogicalType, col arrow.Array, rowCount int) (message.DecodedVector, error) {
-	validity := buildValidity(col, rowCount)
-	switch arr := col.(type) {
-	case *array.Boolean:
-		vs := make([]bool, rowCount)
-		for i := 0; i < rowCount; i++ {
-			if !arr.IsNull(i) {
-				vs[i] = arr.Value(i)
-			}
-		}
-		return message.BoolVec{TypeRef: t, Values: vs, Validity: validity}, nil
-	case *array.Int8:
-		vs := make([]int8, rowCount)
-		for i := 0; i < rowCount; i++ {
-			if !arr.IsNull(i) {
-				vs[i] = arr.Value(i)
-			}
-		}
-		return message.ByteVec{TypeRef: t, Values: vs, Validity: validity}, nil
-	case *array.Int16:
-		vs := make([]int16, rowCount)
-		for i := 0; i < rowCount; i++ {
-			if !arr.IsNull(i) {
-				vs[i] = arr.Value(i)
-			}
-		}
-		return message.ShortVec{TypeRef: t, Values: vs, Validity: validity}, nil
-	case *array.Int32:
-		vs := make([]int32, rowCount)
-		for i := 0; i < rowCount; i++ {
-			if !arr.IsNull(i) {
-				vs[i] = arr.Value(i)
-			}
-		}
-		return message.IntVec{TypeRef: t, Values: vs, Validity: validity}, nil
-	case *array.Int64:
-		vs := make([]int64, rowCount)
-		for i := 0; i < rowCount; i++ {
-			if !arr.IsNull(i) {
-				vs[i] = arr.Value(i)
-			}
-		}
-		return message.LongVec{TypeRef: t, Values: vs, Validity: validity}, nil
-	case *array.Uint8:
-		vs := make([]int16, rowCount) // promoted
-		for i := 0; i < rowCount; i++ {
-			if !arr.IsNull(i) {
-				vs[i] = int16(arr.Value(i))
-			}
-		}
-		return message.ShortVec{TypeRef: t, Values: vs, Validity: validity}, nil
-	case *array.Uint16:
-		vs := make([]int32, rowCount)
-		for i := 0; i < rowCount; i++ {
-			if !arr.IsNull(i) {
-				vs[i] = int32(arr.Value(i))
-			}
-		}
-		return message.IntVec{TypeRef: t, Values: vs, Validity: validity}, nil
-	case *array.Uint32:
-		vs := make([]int64, rowCount)
-		for i := 0; i < rowCount; i++ {
-			if !arr.IsNull(i) {
-				vs[i] = int64(arr.Value(i))
-			}
-		}
-		return message.LongVec{TypeRef: t, Values: vs, Validity: validity}, nil
-	case *array.Uint64:
-		vs := make([]int64, rowCount)
-		for i := 0; i < rowCount; i++ {
-			if !arr.IsNull(i) {
-				vs[i] = int64(arr.Value(i))
-			}
-		}
-		return message.LongVec{TypeRef: t, Values: vs, Validity: validity}, nil
-	case *array.Float32:
-		vs := make([]float32, rowCount)
-		for i := 0; i < rowCount; i++ {
-			if !arr.IsNull(i) {
-				vs[i] = arr.Value(i)
-			}
-		}
-		return message.FloatVec{TypeRef: t, Values: vs, Validity: validity}, nil
-	case *array.Float64:
-		vs := make([]float64, rowCount)
-		for i := 0; i < rowCount; i++ {
-			if !arr.IsNull(i) {
-				vs[i] = arr.Value(i)
-			}
-		}
-		return message.DoubleVec{TypeRef: t, Values: vs, Validity: validity}, nil
-	case *array.String:
-		vs := make([]interface{}, rowCount)
-		for i := 0; i < rowCount; i++ {
-			if !arr.IsNull(i) {
-				vs[i] = arr.Value(i)
-			}
-		}
-		return message.ObjectVec{TypeRef: t, Values: vs}, nil
-	case *array.Binary:
-		vs := make([]interface{}, rowCount)
-		for i := 0; i < rowCount; i++ {
-			if !arr.IsNull(i) {
-				v := arr.Value(i)
-				out := make([]byte, len(v))
-				copy(out, v)
-				vs[i] = out
-			}
-		}
-		return message.ObjectVec{TypeRef: t, Values: vs}, nil
-	case *array.Decimal128:
-		dt := arr.DataType().(*arrow.Decimal128Type)
-		vs := make([]interface{}, rowCount)
-		for i := 0; i < rowCount; i++ {
-			if !arr.IsNull(i) {
-				v := arr.Value(i)
-				bi := decimal128.Num.BigInt(v)
-				_ = dt
-				vs[i] = bi
-			}
-		}
-		return message.ObjectVec{TypeRef: t, Values: vs}, nil
-	}
-	return nil, fmt.Errorf("decodedVectorForArrow: unsupported array %T", col)
-}
-
-func buildValidity(col arrow.Array, rowCount int) []uint64 {
-	if col.NullN() == 0 {
-		return nil
-	}
-	validity := message.ValidityAllValid(rowCount)
-	for i := 0; i < rowCount; i++ {
-		if col.IsNull(i) {
-			message.ValiditySetNull(validity, i)
-		}
-	}
-	return validity
+	return c.sql, nil
 }

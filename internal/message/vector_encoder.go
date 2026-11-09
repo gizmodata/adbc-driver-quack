@@ -18,6 +18,10 @@ func EncodeDataChunkWrapper(w *codec.BinaryWriter, chunk DataChunk) {
 
 // EncodeDataChunk writes the body of a DataChunk.
 func EncodeDataChunk(w *codec.BinaryWriter, chunk DataChunk) {
+	if chunk.Raw != nil {
+		w.WriteBytes(chunk.Raw)
+		return
+	}
 	if len(chunk.Types) != len(chunk.Columns) {
 		panic("EncodeDataChunk: type count must match column count")
 	}
@@ -226,7 +230,7 @@ func encodeInt64LogicalValueForWrite(t quacktype.LogicalType, value interface{})
 		if tm, ok := value.(time.Time); ok {
 			return tm.UnixMicro()
 		}
-	case quacktype.LogicalTypeIDTimestampNS:
+	case quacktype.LogicalTypeIDTimestampNS, quacktype.LogicalTypeIDTimestampTZNS:
 		if tm, ok := value.(time.Time); ok {
 			return tm.UnixNano()
 		}

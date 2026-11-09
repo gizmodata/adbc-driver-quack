@@ -31,6 +31,14 @@ func NewBinaryReader(b []byte) *BinaryReader {
 // succeeded.
 func (r *BinaryReader) Err() error { return r.err }
 
+// Fail records err as the reader's sticky error (unless one is already
+// set), so a decoder can reject well-formed bytes that make no sense.
+func (r *BinaryReader) Fail(err error) {
+	if r.err == nil && err != nil {
+		r.err = err
+	}
+}
+
 // Position returns the current read offset.
 func (r *BinaryReader) Position() int { return r.offset }
 

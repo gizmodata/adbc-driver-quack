@@ -3,6 +3,7 @@ package quack
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/apache/arrow-adbc/go/adbc"
 	"github.com/apache/arrow-go/v18/arrow"
@@ -83,7 +84,28 @@ func (c *connectionImpl) getTableSchemaImpl(ctx context.Context, catalog, dbSche
 		}
 	}
 	if len(fields) == 0 {
-		return nil, errStatus(adbc.StatusNotFound, "table %q not found", tableName)
+		return nil, adbc.Error{Code: adbc.StatusNotFound, Msg: fmt.Sprintf("table %q not found", tableName), SqlState: sqlState("42S02")}
+	}
+	// The printed type names lose detail (TIMESTAMP_S, nested types, ...):
+	// take the exact types from an empty scan of the table, which carries
+	// DuckDB's own logical types over Quack, and keep the catalog's
+	// nullability.
+	var target []string
+	if catalog != nil && *catalog != "" {
+		target = append(target, quoteIdent(*catalog))
+	}
+	if dbSchema != nil && *dbSchema != "" {
+		target = append(target, quoteIdent(*dbSchema))
+	}
+	target = append(target, quoteIdent(tableName))
+	typed, err := c.sess.drainPrepared(ctx, "SELECT * FROM "+strings.Join(target, ".")+" LIMIT 0")
+	if err != nil {
+		return nil, fromTransportError(err)
+	}
+	if len(typed.ColumnTypes) == len(fields) {
+		for i := range fields {
+			fields[i].Type = arrowType(typed.ColumnTypes[i])
+		}
 	}
 	return arrow.NewSchema(fields, nil), nil
 }

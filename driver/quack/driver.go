@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/apache/arrow-adbc/go/adbc"
@@ -27,6 +28,14 @@ const (
 	OptionTokenEnv  = "adbc.quack.token_env"
 	OptionTokenFile = "adbc.quack.token_file"
 	OptionTLS       = "adbc.quack.tls"
+	// OptionSSLFingerprint pins the server certificate by its SHA-256
+	// fingerprint instead of CA verification; implies TLS.
+	OptionSSLFingerprint = "adbc.quack.ssl_fingerprint"
+	// OptionHeartbeatTimeout is the connection lease, in seconds, the
+	// driver asks for (default 60) and renews while idle.
+	OptionHeartbeatTimeout = "adbc.quack.heartbeat_timeout_seconds"
+	// OptionClientID is an opaque client identifier (empty or >= 4 chars).
+	OptionClientID = "adbc.quack.client_id"
 	// HTTP timeouts: plain digits are seconds, anything else is parsed
 	// as a Go duration (e.g. "1.5s").
 	OptionConnectTimeout = "adbc.quack.rpc.timeout_seconds.connect"
@@ -57,11 +66,22 @@ func (d *driverImpl) NewDatabase(opts map[string]string) (adbc.Database, error) 
 }
 
 func (d *driverImpl) NewDatabaseWithContext(_ context.Context, opts map[string]string) (adbc.Database, error) {
-	db := &databaseImpl{
-		alloc: d.alloc,
-		opts:  cloneMap(opts),
+	db := &databaseImpl{alloc: d.alloc, opts: map[string]string{}}
+	if err := db.SetOptions(opts); err != nil {
+		return nil, err
 	}
 	return db, nil
+}
+
+// knownDatabaseOption reports whether key is a database option this
+// driver reads. An unknown key is an error (ADBC: NOT_IMPLEMENTED), so a
+// misspelled option fails loudly instead of being ignored.
+func knownDatabaseOption(key string) bool {
+	switch key {
+	case OptionURI, adbc.OptionKeyUsername, adbc.OptionKeyPassword, "token", "tls":
+		return true
+	}
+	return strings.HasPrefix(key, "adbc.quack.") || strings.HasPrefix(key, "adbc.telemetry.")
 }
 
 type databaseImpl struct {
@@ -71,6 +91,11 @@ type databaseImpl struct {
 }
 
 func (d *databaseImpl) SetOptions(opts map[string]string) error {
+	for k := range opts {
+		if !knownDatabaseOption(k) {
+			return notImplemented(k)
+		}
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	for k, v := range opts {
@@ -108,9 +133,14 @@ type connectionImpl struct {
 	alloc      memory.Allocator
 	autoCommit bool
 	txOpen     bool // true when we have issued BEGIN TRANSACTION but not yet COMMIT/ROLLBACK
+	closed     bool
 }
 
 func (c *connectionImpl) Close() error {
+	if c.closed {
+		return errStatus(adbc.StatusInvalidState, "connection already closed")
+	}
+	c.closed = true
 	// If a manual transaction is still open at close, roll it back rather
 	// than leak it on the server.
 	if c.txOpen {
@@ -212,8 +242,10 @@ func (c *connectionImpl) SetOption(key, value string) error {
 				"unknown value %q for %s; expected %q or %q",
 				value, key, adbc.OptionValueEnabled, adbc.OptionValueDisabled)
 		}
+	case adbc.OptionKeyCurrentCatalog, adbc.OptionKeyCurrentDbSchema:
+		return c.useCatalogSchema(key, value)
 	}
-	return nil
+	return notImplemented(key)
 }
 
 func (c *connectionImpl) ReadPartition(context.Context, []byte) (array.RecordReader, error) {
@@ -245,12 +277,13 @@ func (c *connectionImpl) execNoResult(ctx context.Context, sql string) error {
 
 // statementImpl implements adbc.Statement.
 type statementImpl struct {
-	conn         *connectionImpl
-	alloc        memory.Allocator
-	sql          string
-	closed       bool
-	targetTable  string
-	targetSchema string
+	conn          *connectionImpl
+	alloc         memory.Allocator
+	sql           string
+	closed        bool
+	targetTable   string
+	targetSchema  string
+	targetCatalog string
 	// ingestMode is one of adbc.OptionValueIngestMode*. Empty means the
 	// ADBC default, which is "create" (create the table, then append).
 	ingestMode      string
@@ -260,6 +293,9 @@ type statementImpl struct {
 }
 
 func (s *statementImpl) Close() error {
+	if s.closed {
+		return errStatus(adbc.StatusInvalidState, "statement already closed")
+	}
 	s.closed = true
 	s.clearBound()
 	return nil
@@ -272,6 +308,8 @@ func (s *statementImpl) SetOption(key, value string) error {
 		s.targetTable = value
 	case adbc.OptionValueIngestTargetDBSchema:
 		s.targetSchema = value
+	case adbc.OptionValueIngestTargetCatalog:
+		s.targetCatalog = value
 	case adbc.OptionKeyIngestMode:
 		switch value {
 		case adbc.OptionValueIngestModeCreate,
@@ -292,6 +330,8 @@ func (s *statementImpl) SetOption(key, value string) error {
 			return errStatus(adbc.StatusInvalidArgument, "invalid value %q for %s (want %q or %q)",
 				value, key, adbc.OptionValueEnabled, adbc.OptionValueDisabled)
 		}
+	default:
+		return notImplemented(key)
 	}
 	return nil
 }
@@ -301,11 +341,16 @@ func (s *statementImpl) SetSubstraitPlan([]byte) error {
 func (s *statementImpl) Prepare(_ context.Context) error { return nil }
 
 func (s *statementImpl) ExecuteQuery(ctx context.Context) (array.RecordReader, int64, error) {
-	if s.sql == "" {
+	if s.sql == "" && (s.targetTable == "" || (s.bound == nil && s.boundStream == nil)) {
 		return nil, -1, errStatus(adbc.StatusInvalidState, "Statement.ExecuteQuery: no SQL set")
 	}
 	if err := s.conn.beginTxIfNeeded(ctx); err != nil {
 		return nil, -1, err
+	}
+	if s.targetTable != "" && (s.bound != nil || s.boundStream != nil) {
+		// Bulk ingest through ExecuteQuery: no result stream, just the count.
+		n, err := s.executeIngest(ctx)
+		return nil, n, err
 	}
 	if s.bound != nil || s.boundStream != nil {
 		return s.executeBoundQuery(ctx)
@@ -314,14 +359,19 @@ func (s *statementImpl) ExecuteQuery(ctx context.Context) (array.RecordReader, i
 	if err != nil {
 		return nil, -1, fromTransportError(err)
 	}
+	// A DML statement's whole result (one "Count" row) arrives with
+	// PREPARE: report it as rows affected. For a query the count is
+	// unknown until the reader is drained; ADBC allows -1 for that.
+	affected := int64(-1)
+	if !cur.needsMore && isDMLStatement(s.sql) {
+		affected = countFromChunks(cur.columnNamesSlice(), cur.buffered)
+	}
 	reader, err := newStreamingRecordReader(ctx, s.alloc, cur)
 	if err != nil {
 		cur.close()
 		return nil, -1, errStatus(adbc.StatusInternal, "newStreamingRecordReader: %v", err)
 	}
-	// Row count is unknown until the reader is fully drained; ADBC's
-	// contract allows -1 to mean "unknown".
-	return reader, -1, nil
+	return reader, affected, nil
 }
 
 func (s *statementImpl) ExecuteUpdate(ctx context.Context) (int64, error) {
@@ -344,11 +394,37 @@ func (s *statementImpl) ExecuteUpdate(ctx context.Context) (int64, error) {
 	if err != nil {
 		return -1, fromTransportError(err)
 	}
-	var rows int64
-	for _, c := range result.Chunks {
-		rows += int64(c.RowCount)
+	return countFromChunks(result.ColumnNames, result.Chunks), nil
+}
+
+// ExecuteSchema returns the result schema without running the query
+// (ADBC 1.1 StatementExecuteSchema; adbc_scanner's adbc_scan needs it).
+// Quack has no describe message, so the driver asks for
+// `SELECT * FROM (<query>) LIMIT 0`: DuckDB plans that to an empty result,
+// so none of the query's work runs, and the reply still carries the exact
+// column types. Parameter markers bind as NULL.
+func (s *statementImpl) ExecuteSchema(ctx context.Context) (*arrow.Schema, error) {
+	if s.sql == "" {
+		return nil, errStatus(adbc.StatusInvalidState, "Statement.ExecuteSchema: no SQL set")
 	}
-	return rows, nil
+	inner, err := replaceParamMarkers(s.sql, func() (string, error) { return "NULL", nil })
+	if err != nil {
+		return nil, errStatus(adbc.StatusInvalidArgument, "%v", err)
+	}
+	inner = strings.TrimRight(strings.TrimSpace(inner), ";")
+	if err := s.conn.beginTxIfNeeded(ctx); err != nil {
+		return nil, err
+	}
+	result, err := s.conn.sess.drainPrepared(ctx, "SELECT * FROM ("+inner+"\n) LIMIT 0")
+	if err != nil {
+		var se *transport.ErrServerError
+		if errors.As(err, &se) && (se.ExceptionType == "Parser" || strings.Contains(se.Message, "syntax error")) {
+			return nil, errStatus(adbc.StatusNotImplemented,
+				"ExecuteSchema: the statement is not a query, so it has no result schema to describe")
+		}
+		return nil, fromTransportError(err)
+	}
+	return SchemaFromColumns(result.ColumnNames, result.ColumnTypes), nil
 }
 
 func (s *statementImpl) GetParameterSchema() (*arrow.Schema, error) {
@@ -419,22 +495,12 @@ func errStatus(code adbc.Status, format string, args ...interface{}) error {
 	return adbc.Error{Code: code, Msg: fmt.Sprintf(format, args...)}
 }
 
-func fromTransportError(err error) error {
-	if err == nil {
-		return nil
-	}
-	var se *transport.ErrServerError
-	if errors.As(err, &se) {
-		return adbc.Error{Code: adbc.StatusInternal, Msg: se.Message}
-	}
-	return adbc.Error{Code: adbc.StatusIO, Msg: err.Error()}
-}
-
 // Compile-time interface checks.
 var (
-	_ adbc.Driver          = (*driverImpl)(nil)
-	_ adbc.Database        = (*databaseImpl)(nil)
-	_ adbc.Connection      = (*connectionImpl)(nil)
-	_ adbc.Statement       = (*statementImpl)(nil)
-	_ message.QuackMessage = message.ConnectionRequest{} // keep imports satisfied
+	_ adbc.Driver                 = (*driverImpl)(nil)
+	_ adbc.Database               = (*databaseImpl)(nil)
+	_ adbc.Connection             = (*connectionImpl)(nil)
+	_ adbc.Statement              = (*statementImpl)(nil)
+	_ adbc.StatementExecuteSchema = (*statementImpl)(nil)
+	_ message.QuackMessage        = message.ConnectionRequest{} // keep imports satisfied
 )

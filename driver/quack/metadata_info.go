@@ -16,8 +16,8 @@ import (
 var driverInfoValues = map[adbc.InfoCode]string{
 	adbc.InfoVendorName:         "DuckDB (via Quack)",
 	adbc.InfoDriverName:         "ADBC Quack Driver - Go",
-	adbc.InfoDriverVersion:      "0.0.0", // updated below from build info if available
-	adbc.InfoDriverArrowVersion: "arrow-go/v18",
+	adbc.InfoDriverVersion:      Version,
+	adbc.InfoDriverArrowVersion: arrowGoVersion(),
 }
 
 // supportedInfoCodes is the default set we emit when the caller passes no codes.
@@ -59,11 +59,6 @@ func (c *connectionImpl) getInfoImpl(ctx context.Context, infoCodes []adbc.InfoC
 	}
 
 	driverVersion := driverInfoValues[adbc.InfoDriverVersion]
-	if info, ok := debug.ReadBuildInfo(); ok {
-		if info.Main.Version != "" && info.Main.Version != "(devel)" {
-			driverVersion = info.Main.Version
-		}
-	}
 
 	for _, code := range infoCodes {
 		nameBldr.Append(uint32(code))
@@ -126,9 +121,15 @@ func (c *connectionImpl) getInfoImpl(ctx context.Context, infoCodes []adbc.InfoC
 	return array.NewRecordReader(adbc.GetInfoSchema, []arrow.Record{rec})
 }
 
-// fetchVendorVersion runs PRAGMA version and returns the version string.
-// Returns "" on any error — InfoVendorVersion will then be null.
+// fetchVendorVersion returns the server's DuckDB version. The handshake
+// reports it, so no query is needed (a query would also supersede a
+// result the caller is still reading: Quack runs one statement at a time
+// per connection). Falls back to PRAGMA version for a server that left
+// it empty.
 func (c *connectionImpl) fetchVendorVersion(ctx context.Context) string {
+	if c.sess.serverVersion != "" {
+		return c.sess.serverVersion
+	}
 	result, err := c.sess.drainPrepared(ctx, "PRAGMA version")
 	if err != nil || len(result.Chunks) == 0 {
 		return ""
@@ -150,3 +151,19 @@ func (c *connectionImpl) fetchVendorVersion(ctx context.Context) string {
 // Type assertion to keep imports referenced even if other build tags
 // strip code paths.
 var _ message.QuackMessage = message.SuccessResponse{}
+
+// arrowGoVersion is the arrow-go module version the driver was built with
+// ("v18.8.0"), from the binary's build info.
+func arrowGoVersion() string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, dep := range info.Deps {
+			if dep.Path == "github.com/apache/arrow-go/v18" {
+				if dep.Replace != nil {
+					return dep.Replace.Version
+				}
+				return dep.Version
+			}
+		}
+	}
+	return "v18"
+}

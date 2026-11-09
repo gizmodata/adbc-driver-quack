@@ -204,8 +204,7 @@ func initLoggingFromEnv(db adbc.Database) {
 		logLevel = slog.LevelDebug
 	case "info":
 		logLevel = slog.LevelInfo
-	case "warn":
-	case "warning":
+	case "warn", "warning":
 		logLevel = slog.LevelWarn
 	case "error":
 		logLevel = slog.LevelError
@@ -394,7 +393,9 @@ func QuackArrayStreamGetNext(stream *C.struct_ArrowArrayStream, array *C.struct_
 	}
 	cStream := getFromHandle[cArrayStream](stream.private_data)
 	if cStream.rdr.Next() {
-		cdata.ExportArrowRecordBatch(cStream.rdr.RecordBatch(), toCdataArray(array), nil)
+		// Not cdata.ExportArrowRecordBatch: it exports extension arrays
+		// (VARIANT, geoarrow.wkb) without their storage children.
+		exportRecordBatch(cStream.rdr.RecordBatch(), toCdataArray(array))
 		return 0
 	}
 	array.release = nil
@@ -1622,7 +1623,9 @@ func QuackStatementSetSubstraitPlan(stmt *C.struct_AdbcStatement, plan *C.cuint8
 		return C.ADBC_STATUS_INVALID_STATE
 	}
 
-	return C.AdbcStatusCode(errToAdbcErr(err, st.stmt.SetSubstraitPlan(fromCArr[byte](plan, int(length)))))
+	// XXX: must copy here or the C side may invalidate *plan
+	goPlan := C.GoBytes(unsafe.Pointer(plan), C.int(length))
+	return C.AdbcStatusCode(errToAdbcErr(err, st.stmt.SetSubstraitPlan(goPlan)))
 }
 
 //export QuackStatementBind

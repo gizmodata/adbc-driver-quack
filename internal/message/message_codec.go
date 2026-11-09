@@ -2,16 +2,23 @@ package message
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/gizmodata/adbc-driver-quack/internal/codec"
 	"github.com/gizmodata/adbc-driver-quack/internal/quacktype"
 )
+
+// The wire format (QUACK_VERSION 3) is: a header object, a body object,
+// and, for FETCH_RESPONSE and SEND_DATA_REQUEST only, a "blob" of
+// ChunkCount DataChunk objects written back to back after the body.
+// Field ids and defaults mirror duckdb-quack's serialize_quack_message.cpp.
 
 // EncodeMessage serializes a Quack message to wire bytes.
 func EncodeMessage(m QuackMessage) ([]byte, error) {
 	w := codec.NewBinaryWriter(256)
 	encodeHeader(w, m.Header(), messageTypeOf(m))
 	encodeBody(w, m)
+	encodeBlob(w, m)
 	if w.Err() != nil {
 		return nil, w.Err()
 	}
@@ -26,6 +33,13 @@ func DecodeMessage(bytes []byte) (QuackMessage, error) {
 		return nil, r.Err()
 	}
 	m := decodeBody(r, header)
+	if r.Err() != nil {
+		return nil, r.Err()
+	}
+	if m == nil {
+		return nil, fmt.Errorf("message: unsupported message type %d", header.Type)
+	}
+	m = decodeBlob(r, m)
 	if r.Err() != nil {
 		return nil, r.Err()
 	}
@@ -49,12 +63,20 @@ func messageTypeOf(m QuackMessage) MessageType {
 		return MessageTypeFetchRequest
 	case FetchResponse:
 		return MessageTypeFetchResponse
-	case AppendRequest:
-		return MessageTypeAppendRequest
+	case SendDataRequest:
+		return MessageTypeSendDataRequest
+	case SendDataResponse:
+		return MessageTypeSendDataResponse
 	case SuccessResponse:
 		return MessageTypeSuccessResponse
 	case DisconnectMessage:
 		return MessageTypeDisconnectMessage
+	case HeartbeatRequest:
+		return MessageTypeHeartbeatRequest
+	case CancelRequest:
+		return MessageTypeCancelRequest
+	case Acknowledgement:
+		return MessageTypeAcknowledgement
 	case ErrorResponse:
 		return MessageTypeErrorResponse
 	}
@@ -78,8 +100,8 @@ func encodeHeader(w *codec.BinaryWriter, hdr MessageHeader, mt MessageType) {
 func decodeHeader(r *codec.BinaryReader) MessageHeader {
 	v, _ := codec.ReadObject(r, func(rr *codec.BinaryReader) MessageHeader {
 		mt := MessageType(codec.ReadRequiredField(rr, 1, func(rrr *codec.BinaryReader) int { return rrr.ReadULEB128Int() }))
-		connID := codec.ReadOptionalField(rr, 2, func(rrr *codec.BinaryReader) string { return rrr.ReadString() }, "")
-		queryID := codec.ReadRequiredField(rr, 3, func(rrr *codec.BinaryReader) uint64 { return rrr.ReadULEB128() })
+		connID := codec.ReadOptionalField(rr, 2, readString, "")
+		queryID := codec.ReadOptionalField(rr, 3, readULEB, codec.OptionalIndexInvalid)
 		return MessageHeader{Type: mt, ConnectionID: connID, ClientQueryID: queryID}
 	})
 	return v
@@ -92,20 +114,23 @@ func encodeBody(w *codec.BinaryWriter, m QuackMessage) {
 			writeOptionalString(o, 1, v.AuthString)
 			writeOptionalString(o, 2, v.ClientDuckDBVersion)
 			writeOptionalString(o, 3, v.ClientPlatform)
-			writeOptionalIndexNonZero(o, 4, v.MinSupportedQuackVersion)
-			writeOptionalIndexNonZero(o, 5, v.MaxSupportedQuackVersion)
+			writeIndexNonZero(o, 4, v.MinSupportedQuackVersion)
+			writeIndexNonZero(o, 5, v.MaxSupportedQuackVersion)
+			writeOptionalString(o, 6, v.ClientID)
+			writeIndexNonZero(o, 7, v.HeartbeatTimeoutSeconds)
 		})
 	case ConnectionResponse:
 		w.WriteObject(func(o *codec.BinaryWriter) {
 			writeOptionalString(o, 1, v.ServerDuckDBVersion)
 			writeOptionalString(o, 2, v.ServerPlatform)
-			if v.HasQuackVersion {
-				o.WriteField(3, func(oo *codec.BinaryWriter) { oo.WriteULEB128(v.QuackVersion) })
-			}
+			writeIndexNonZero(o, 3, v.QuackVersion)
+			writeIndexNonZero(o, 4, v.HeartbeatTimeoutSeconds)
 		})
 	case PrepareRequest:
 		w.WriteObject(func(o *codec.BinaryWriter) {
 			writeOptionalString(o, 1, v.SQL)
+			o.WriteField(2, func(oo *codec.BinaryWriter) { oo.WriteHugeInt(v.QueryUUID) })
+			writeOptionalIndex(o, 3, v.InlineRows)
 		})
 	case PrepareResponse:
 		w.WriteObject(func(o *codec.BinaryWriter) {
@@ -127,41 +152,114 @@ func encodeBody(w *codec.BinaryWriter, m QuackMessage) {
 			if len(v.Results) > 0 {
 				o.WriteField(4, func(oo *codec.BinaryWriter) { writeChunkPointerList(oo, v.Results) })
 			}
-			o.WriteField(5, func(oo *codec.BinaryWriter) { oo.WriteHugeInt(v.ResultUUID) })
+			o.WriteField(5, func(oo *codec.BinaryWriter) { oo.WriteHugeInt(v.QueryUUID) })
 		})
 	case FetchRequest:
 		w.WriteObject(func(o *codec.BinaryWriter) {
-			o.WriteField(1, func(oo *codec.BinaryWriter) { oo.WriteHugeInt(v.ResultUUID) })
+			o.WriteField(1, func(oo *codec.BinaryWriter) { oo.WriteHugeInt(v.QueryUUID) })
+			writeIndexNonZero(o, 2, v.BatchIndex)
+			writeIndexNonZero(o, 3, v.AckIndex)
 		})
 	case FetchResponse:
 		w.WriteObject(func(o *codec.BinaryWriter) {
-			if len(v.Results) > 0 {
-				o.WriteField(1, func(oo *codec.BinaryWriter) { writeChunkPointerList(oo, v.Results) })
-			}
-			batchIdx := v.BatchIndex
-			if !v.HasBatchIndex {
-				batchIdx = codec.OptionalIndexInvalid
-			}
-			o.WriteField(2, func(oo *codec.BinaryWriter) { oo.WriteULEB128(batchIdx) })
+			writeIndexNonZero(o, 1, uint64(len(v.Results)))
+			writeOptionalIndex(o, 2, v.TotalBatches)
+			writeOptionalIndex(o, 3, v.BatchIndex)
 		})
-	case AppendRequest:
+	case SendDataRequest:
 		w.WriteObject(func(o *codec.BinaryWriter) {
-			writeOptionalString(o, 1, v.SchemaName)
-			if v.TableName != "" {
-				o.WriteField(2, func(oo *codec.BinaryWriter) { oo.WriteString(v.TableName) })
-			}
-			o.WriteField(3, func(oo *codec.BinaryWriter) {
-				oo.WriteBool(true)
-				EncodeDataChunkWrapper(oo, v.AppendChunk)
-			})
+			writeOptionalString(o, 1, v.StreamID)
+			writeIndexNonZero(o, 2, uint64(len(v.Chunks)))
+			writeOptionalIndex(o, 3, v.TotalBatches)
+			writeOptionalIndex(o, 4, v.BatchIndex)
 		})
-	case SuccessResponse, DisconnectMessage:
+	case SendDataResponse:
+		w.WriteObject(func(o *codec.BinaryWriter) {
+			budget := codec.OptionalIndexInvalid
+			if v.AcceptBudget.Valid {
+				budget = v.AcceptBudget.Value
+			}
+			o.WriteField(1, func(oo *codec.BinaryWriter) { oo.WriteULEB128(budget) })
+		})
+	case SuccessResponse, DisconnectMessage, HeartbeatRequest:
 		w.WriteObject(func(o *codec.BinaryWriter) {})
+	case CancelRequest:
+		w.WriteObject(func(o *codec.BinaryWriter) {
+			o.WriteField(1, func(oo *codec.BinaryWriter) { oo.WriteHugeInt(v.QueryUUID) })
+		})
+	case Acknowledgement:
+		w.WriteObject(func(o *codec.BinaryWriter) {
+			if v.QueryUUID != (codec.HugeIntParts{}) {
+				o.WriteField(1, func(oo *codec.BinaryWriter) { oo.WriteHugeInt(v.QueryUUID) })
+			}
+		})
 	case ErrorResponse:
 		w.WriteObject(func(o *codec.BinaryWriter) {
 			writeOptionalString(o, 1, v.Message)
+			writeOptionalString(o, 2, v.ExceptionType)
+			if len(v.ExtraInfo) > 0 {
+				keys := make([]string, 0, len(v.ExtraInfo))
+				for k := range v.ExtraInfo {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				o.WriteField(3, func(oo *codec.BinaryWriter) {
+					codec.WriteList(oo, keys, func(_ int, k string, ww *codec.BinaryWriter) {
+						ww.WriteObject(func(pair *codec.BinaryWriter) {
+							pair.WriteField(0, func(p *codec.BinaryWriter) { p.WriteString(k) })
+							pair.WriteField(1, func(p *codec.BinaryWriter) { p.WriteString(v.ExtraInfo[k]) })
+						})
+					})
+				})
+			}
+			if v.MustInvalidate {
+				o.WriteField(4, func(oo *codec.BinaryWriter) { oo.WriteBool(true) })
+			}
 		})
 	}
+}
+
+// encodeBlob writes the chunk blob that follows FETCH_RESPONSE and
+// SEND_DATA_REQUEST bodies: each chunk is one self-delimiting object.
+func encodeBlob(w *codec.BinaryWriter, m QuackMessage) {
+	var chunks []DataChunk
+	switch v := m.(type) {
+	case FetchResponse:
+		chunks = v.Results
+	case SendDataRequest:
+		chunks = v.Chunks
+	default:
+		return
+	}
+	for _, c := range chunks {
+		EncodeDataChunk(w, c)
+	}
+}
+
+func decodeBlob(r *codec.BinaryReader, m QuackMessage) QuackMessage {
+	switch v := m.(type) {
+	case FetchResponse:
+		v.Results = readChunkBlob(r, v.ChunkCount)
+		return v
+	case SendDataRequest:
+		count := uint64(len(v.Chunks))
+		v.Chunks = readChunkBlob(r, count)
+		return v
+	}
+	return m
+}
+
+func readChunkBlob(r *codec.BinaryReader, count uint64) []DataChunk {
+	if count == 0 {
+		return nil
+	}
+	// The count comes from the wire: cap the reservation, a false count
+	// fails on the read.
+	out := make([]DataChunk, 0, min(count, 1024))
+	for i := uint64(0); i < count && r.Err() == nil; i++ {
+		out = append(out, DecodeDataChunk(r))
+	}
+	return out
 }
 
 func decodeBody(r *codec.BinaryReader, header MessageHeader) QuackMessage {
@@ -169,33 +267,33 @@ func decodeBody(r *codec.BinaryReader, header MessageHeader) QuackMessage {
 	case MessageTypeConnectionRequest:
 		v, _ := codec.ReadObject(r, func(obj *codec.BinaryReader) QuackMessage {
 			m := ConnectionRequest{Hdr: header}
-			m.AuthString = codec.ReadOptionalField(obj, 1, func(o *codec.BinaryReader) string { return o.ReadString() }, "")
-			m.ClientDuckDBVersion = codec.ReadOptionalField(obj, 2, func(o *codec.BinaryReader) string { return o.ReadString() }, "")
-			m.ClientPlatform = codec.ReadOptionalField(obj, 3, func(o *codec.BinaryReader) string { return o.ReadString() }, "")
-			m.MinSupportedQuackVersion = codec.ReadOptionalField(obj, 4, func(o *codec.BinaryReader) uint64 { return o.ReadULEB128() }, 0)
-			m.MaxSupportedQuackVersion = codec.ReadOptionalField(obj, 5, func(o *codec.BinaryReader) uint64 { return o.ReadULEB128() }, 0)
+			m.AuthString = codec.ReadOptionalField(obj, 1, readString, "")
+			m.ClientDuckDBVersion = codec.ReadOptionalField(obj, 2, readString, "")
+			m.ClientPlatform = codec.ReadOptionalField(obj, 3, readString, "")
+			m.MinSupportedQuackVersion = codec.ReadOptionalField(obj, 4, readULEB, 0)
+			m.MaxSupportedQuackVersion = codec.ReadOptionalField(obj, 5, readULEB, 0)
+			m.ClientID = codec.ReadOptionalField(obj, 6, readString, "")
+			m.HeartbeatTimeoutSeconds = codec.ReadOptionalField(obj, 7, readULEB, 0)
 			return m
 		})
 		return v
 	case MessageTypeConnectionResponse:
 		v, _ := codec.ReadObject(r, func(obj *codec.BinaryReader) QuackMessage {
 			m := ConnectionResponse{Hdr: header}
-			m.ServerDuckDBVersion = codec.ReadOptionalField(obj, 1, func(o *codec.BinaryReader) string { return o.ReadString() }, "")
-			m.ServerPlatform = codec.ReadOptionalField(obj, 2, func(o *codec.BinaryReader) string { return o.ReadString() }, "")
-			if obj.PeekFieldID() == 3 {
-				obj.ReadFieldID()
-				m.QuackVersion = obj.ReadULEB128()
-				m.HasQuackVersion = true
-			}
+			m.ServerDuckDBVersion = codec.ReadOptionalField(obj, 1, readString, "")
+			m.ServerPlatform = codec.ReadOptionalField(obj, 2, readString, "")
+			m.QuackVersion = codec.ReadOptionalField(obj, 3, readULEB, 0)
+			m.HeartbeatTimeoutSeconds = codec.ReadOptionalField(obj, 4, readULEB, 0)
 			return m
 		})
 		return v
 	case MessageTypePrepareRequest:
 		v, _ := codec.ReadObject(r, func(obj *codec.BinaryReader) QuackMessage {
-			return PrepareRequest{
-				Hdr: header,
-				SQL: codec.ReadOptionalField(obj, 1, func(o *codec.BinaryReader) string { return o.ReadString() }, ""),
-			}
+			m := PrepareRequest{Hdr: header}
+			m.SQL = codec.ReadOptionalField(obj, 1, readString, "")
+			m.QueryUUID = codec.ReadRequiredField(obj, 2, readHugeInt)
+			m.InlineRows = readOptionalIndexField(obj, 3)
+			return m
 		})
 		return v
 	case MessageTypePrepareResponse:
@@ -211,42 +309,45 @@ func decodeBody(r *codec.BinaryReader, header MessageHeader) QuackMessage {
 			}, nil)
 			m.NeedsMoreFetch = codec.ReadOptionalField(obj, 3, func(o *codec.BinaryReader) bool { return o.ReadBool() }, false)
 			m.Results = codec.ReadOptionalField(obj, 4, readChunkPointerList, nil)
-			m.ResultUUID = codec.ReadRequiredField(obj, 5, func(o *codec.BinaryReader) codec.HugeIntParts { return o.ReadHugeInt() })
+			m.QueryUUID = codec.ReadRequiredField(obj, 5, readHugeInt)
 			return m
 		})
 		return v
 	case MessageTypeFetchRequest:
 		v, _ := codec.ReadObject(r, func(obj *codec.BinaryReader) QuackMessage {
-			return FetchRequest{
-				Hdr:        header,
-				ResultUUID: codec.ReadRequiredField(obj, 1, func(o *codec.BinaryReader) codec.HugeIntParts { return o.ReadHugeInt() }),
-			}
+			m := FetchRequest{Hdr: header}
+			m.QueryUUID = codec.ReadRequiredField(obj, 1, readHugeInt)
+			m.BatchIndex = codec.ReadOptionalField(obj, 2, readULEB, 0)
+			m.AckIndex = codec.ReadOptionalField(obj, 3, readULEB, 0)
+			return m
 		})
 		return v
 	case MessageTypeFetchResponse:
 		v, _ := codec.ReadObject(r, func(obj *codec.BinaryReader) QuackMessage {
 			m := FetchResponse{Hdr: header}
-			m.Results = codec.ReadOptionalField(obj, 1, readChunkPointerList, nil)
-			batchIdx := codec.ReadRequiredField(obj, 2, func(o *codec.BinaryReader) uint64 { return o.ReadULEB128() })
-			if batchIdx != codec.OptionalIndexInvalid {
-				m.BatchIndex = batchIdx
-				m.HasBatchIndex = true
+			m.ChunkCount = codec.ReadOptionalField(obj, 1, readULEB, 0)
+			m.TotalBatches = readOptionalIndexField(obj, 2)
+			m.BatchIndex = readOptionalIndexField(obj, 3)
+			return m
+		})
+		return v
+	case MessageTypeSendDataRequest:
+		v, _ := codec.ReadObject(r, func(obj *codec.BinaryReader) QuackMessage {
+			m := SendDataRequest{Hdr: header}
+			m.StreamID = codec.ReadOptionalField(obj, 1, readString, "")
+			count := codec.ReadOptionalField(obj, 2, readULEB, 0)
+			m.TotalBatches = readOptionalIndexField(obj, 3)
+			m.BatchIndex = readOptionalIndexField(obj, 4)
+			// carry the count to decodeBlob through the slice length
+			if count > 0 {
+				m.Chunks = make([]DataChunk, min(count, 1<<20))
 			}
 			return m
 		})
 		return v
-	case MessageTypeAppendRequest:
+	case MessageTypeSendDataResponse:
 		v, _ := codec.ReadObject(r, func(obj *codec.BinaryReader) QuackMessage {
-			m := AppendRequest{Hdr: header}
-			m.SchemaName = codec.ReadOptionalField(obj, 1, func(o *codec.BinaryReader) string { return o.ReadString() }, "")
-			m.TableName = codec.ReadOptionalField(obj, 2, func(o *codec.BinaryReader) string { return o.ReadString() }, "")
-			codec.ReadOptionalField(obj, 3, func(o *codec.BinaryReader) struct{} {
-				if o.ReadBool() {
-					m.AppendChunk = DecodeDataChunkWrapper(o)
-				}
-				return struct{}{}
-			}, struct{}{})
-			return m
+			return SendDataResponse{Hdr: header, AcceptBudget: readOptionalIndexField(obj, 1)}
 		})
 		return v
 	case MessageTypeSuccessResponse:
@@ -255,16 +356,61 @@ func decodeBody(r *codec.BinaryReader, header MessageHeader) QuackMessage {
 	case MessageTypeDisconnectMessage:
 		v, _ := codec.ReadObject(r, func(obj *codec.BinaryReader) QuackMessage { return DisconnectMessage{Hdr: header} })
 		return v
+	case MessageTypeHeartbeatRequest:
+		v, _ := codec.ReadObject(r, func(obj *codec.BinaryReader) QuackMessage { return HeartbeatRequest{Hdr: header} })
+		return v
+	case MessageTypeCancelRequest:
+		v, _ := codec.ReadObject(r, func(obj *codec.BinaryReader) QuackMessage {
+			return CancelRequest{Hdr: header, QueryUUID: codec.ReadRequiredField(obj, 1, readHugeInt)}
+		})
+		return v
+	case MessageTypeAcknowledgement:
+		v, _ := codec.ReadObject(r, func(obj *codec.BinaryReader) QuackMessage {
+			return Acknowledgement{Hdr: header, QueryUUID: codec.ReadOptionalField(obj, 1, readHugeInt, codec.HugeIntParts{})}
+		})
+		return v
 	case MessageTypeErrorResponse:
 		v, _ := codec.ReadObject(r, func(obj *codec.BinaryReader) QuackMessage {
-			return ErrorResponse{
-				Hdr:     header,
-				Message: codec.ReadOptionalField(obj, 1, func(o *codec.BinaryReader) string { return o.ReadString() }, ""),
-			}
+			m := ErrorResponse{Hdr: header}
+			m.Message = codec.ReadOptionalField(obj, 1, readString, "")
+			m.ExceptionType = codec.ReadOptionalField(obj, 2, readString, "")
+			m.ExtraInfo = codec.ReadOptionalField(obj, 3, readStringMap, nil)
+			m.MustInvalidate = codec.ReadOptionalField(obj, 4, func(o *codec.BinaryReader) bool { return o.ReadBool() }, false)
+			return m
 		})
 		return v
 	}
 	return nil
+}
+
+func readString(r *codec.BinaryReader) string              { return r.ReadString() }
+func readULEB(r *codec.BinaryReader) uint64                { return r.ReadULEB128() }
+func readHugeInt(r *codec.BinaryReader) codec.HugeIntParts { return r.ReadHugeInt() }
+
+// readStringMap reads a serialized unordered_map<string, string>: a list
+// of {0: key, 1: value} objects.
+func readStringMap(r *codec.BinaryReader) map[string]string {
+	pairs := codec.ReadList(r, func(_ int, rr *codec.BinaryReader) [2]string {
+		v, _ := codec.ReadObject(rr, func(obj *codec.BinaryReader) [2]string {
+			k := codec.ReadOptionalField(obj, 0, readString, "")
+			val := codec.ReadOptionalField(obj, 1, readString, "")
+			return [2]string{k, val}
+		})
+		return v
+	})
+	out := make(map[string]string, len(pairs))
+	for _, p := range pairs {
+		out[p[0]] = p[1]
+	}
+	return out
+}
+
+func readOptionalIndexField(r *codec.BinaryReader, fieldID uint16) OptionalIndex {
+	v := codec.ReadOptionalField(r, fieldID, readULEB, codec.OptionalIndexInvalid)
+	if v == codec.OptionalIndexInvalid {
+		return OptionalIndex{}
+	}
+	return SomeIndex(v)
 }
 
 func writeOptionalString(w *codec.BinaryWriter, fieldID uint16, value string) {
@@ -273,9 +419,17 @@ func writeOptionalString(w *codec.BinaryWriter, fieldID uint16, value string) {
 	}
 }
 
-func writeOptionalIndexNonZero(w *codec.BinaryWriter, fieldID uint16, value uint64) {
+// writeIndexNonZero writes an idx_t property whose default is 0.
+func writeIndexNonZero(w *codec.BinaryWriter, fieldID uint16, value uint64) {
 	if value != 0 {
 		w.WriteField(fieldID, func(o *codec.BinaryWriter) { o.WriteULEB128(value) })
+	}
+}
+
+// writeOptionalIndex writes an optional_idx property whose default is unset.
+func writeOptionalIndex(w *codec.BinaryWriter, fieldID uint16, value OptionalIndex) {
+	if value.Valid {
+		w.WriteField(fieldID, func(o *codec.BinaryWriter) { o.WriteULEB128(value.Value) })
 	}
 }
 

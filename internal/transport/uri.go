@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gizmodata/adbc-driver-quack/internal/codec"
 )
@@ -19,26 +20,44 @@ import (
 const (
 	DefaultConnectTimeout = 10 * time.Second
 	DefaultRequestTimeout = 60 * time.Second
+	// DefaultHeartbeatTimeout is the connection lease the driver asks the
+	// server for, matching DuckDB's quack_default_heartbeat_timeout. The
+	// driver renews it from a background heartbeat every third of the
+	// lease, so an idle ADBC connection stays alive.
+	DefaultHeartbeatTimeout = 60 * time.Second
 )
 
 // URLScheme is the canonical Quack ADBC URL prefix.
 //
-// Two forms are accepted on input:
+// Three forms are accepted on input:
 //
 //	quack://host[:port][/database][?token=…&tls=…]
+//	quack:host[:port]   (DuckDB's own spelling, as in ATTACH 'quack:host')
 //	jdbc:quack://...    (interop with quack-jdbc URLs; rare)
 const URLScheme = "quack://"
 
 // QuackURI is a parsed Quack connection URL.
 type QuackURI struct {
-	Host           string
-	Port           int
-	Database       string
-	TLS            bool
-	Token          string
-	ConnectTimeout time.Duration
-	RequestTimeout time.Duration
-	Params         map[string]string
+	Host     string
+	Port     int
+	Database string
+	// TLS selects HTTPS. Unless set explicitly (tls=true/false), it
+	// follows DuckDB 2.0's rule: plain HTTP for localhost / 127.0.0.1 /
+	// ::1, HTTPS for every other host. A pinned fingerprint implies TLS.
+	TLS bool
+	// SSLFingerprint, when set, is the SHA-256 fingerprint (64 uppercase
+	// hex digits) of the one server certificate to trust, instead of CA
+	// verification: how a client authenticates a quack_serve self-signed
+	// certificate.
+	SSLFingerprint string
+	// ClientID is sent in the handshake; empty or at least 4 characters.
+	ClientID string
+	// HeartbeatTimeout is the connection lease requested from the server.
+	HeartbeatTimeout time.Duration
+	Token            string
+	ConnectTimeout   time.Duration
+	RequestTimeout   time.Duration
+	Params           map[string]string
 	// ExtraHeaders are additional HTTP headers sent with every request,
 	// e.g. for proxies or load balancers that require their own auth.
 	// Mirrors duckdb-quack's EXTRA_HTTP_HEADERS secret parameter.
@@ -53,7 +72,7 @@ const HTTPHeaderPrefix = "adbc.quack.http.header."
 
 // AcceptsURL reports whether s starts with a recognized Quack URL prefix.
 func AcceptsURL(s string) bool {
-	return strings.HasPrefix(s, URLScheme) || strings.HasPrefix(s, "jdbc:"+URLScheme)
+	return strings.HasPrefix(s, "quack:") || strings.HasPrefix(s, "jdbc:"+URLScheme)
 }
 
 // ParseURI parses a Quack URL with optional extra options that override
@@ -62,9 +81,13 @@ func ParseURI(rawURL string, opts map[string]string) (QuackURI, error) {
 	if !AcceptsURL(rawURL) {
 		return QuackURI{}, fmt.Errorf("transport: not a Quack URL: %q", rawURL)
 	}
-	stripped := rawURL
+	stripped := strings.TrimSpace(rawURL)
 	if strings.HasPrefix(stripped, "jdbc:") {
 		stripped = stripped[len("jdbc:"):]
+	}
+	if !strings.HasPrefix(stripped, URLScheme) && strings.HasPrefix(stripped, "quack:") {
+		// DuckDB's `quack:host[:port]` spelling.
+		stripped = URLScheme + stripped[len("quack:"):]
 	}
 	if !strings.HasPrefix(stripped, URLScheme) {
 		return QuackURI{}, fmt.Errorf("transport: malformed Quack URL: %q", rawURL)
@@ -132,8 +155,33 @@ func ParseURI(rawURL string, opts map[string]string) (QuackURI, error) {
 			q.Params[k] = v
 		}
 	}
-	q.TLS = parseBool(q.Params["tls"]) || parseBool(q.Params["useEncryption"]) || parseBool(q.Params["adbc.quack.tls"])
-	token, err := resolveToken(q.Params)
+	if q.SSLFingerprint, err = normalizeFingerprint(firstNonEmpty(q.Params["ssl_fingerprint"], q.Params["sslFingerprint"], q.Params["adbc.quack.ssl_fingerprint"])); err != nil {
+		return QuackURI{}, err
+	}
+	tlsRaw := firstNonEmpty(q.Params["adbc.quack.tls"], q.Params["tls"], q.Params["useEncryption"])
+	switch {
+	case tlsRaw != "":
+		q.TLS = parseBool(tlsRaw)
+		if !q.TLS && q.SSLFingerprint != "" {
+			return QuackURI{}, fmt.Errorf("transport: ssl_fingerprint pins the server's TLS certificate and cannot be combined with tls=false")
+		}
+	case q.SSLFingerprint != "":
+		q.TLS = true
+	default:
+		q.TLS = !IsLocalHost(q.Host)
+	}
+	q.ClientID = firstNonEmpty(q.Params["adbc.quack.client_id"], q.Params["clientId"], q.Params["client_id"])
+	if q.ClientID != "" && len(q.ClientID) < 4 {
+		return QuackURI{}, fmt.Errorf("transport: client_id must be empty or at least 4 characters")
+	}
+	if q.HeartbeatTimeout, err = parseTimeout(q.Params, "heartbeatTimeout", "adbc.quack.heartbeat_timeout_seconds", DefaultHeartbeatTimeout); err != nil {
+		return QuackURI{}, err
+	}
+	if q.HeartbeatTimeout < time.Second {
+		return QuackURI{}, fmt.Errorf("transport: heartbeat timeout must be at least 1 second")
+	}
+	var token string
+	token, err = resolveToken(q.Params)
 	if err != nil {
 		return QuackURI{}, err
 	}
@@ -229,6 +277,41 @@ func (u QuackURI) HTTPURL() string {
 // QuackURI returns the canonical quack: URI form (no scheme prefix).
 func (u QuackURI) QuackURI() string {
 	return fmt.Sprintf("quack:%s:%d", u.Host, u.Port)
+}
+
+// IsLocalHost reports whether host is a loopback name DuckDB serves over
+// plain HTTP by default.
+func IsLocalHost(host string) bool {
+	h := strings.ToLower(strings.Trim(host, "[]"))
+	return h == "localhost" || h == "127.0.0.1" || h == "::1"
+}
+
+// normalizeFingerprint mirrors QuackUri::NormalizeFingerprint: accept the
+// colon-separated form `openssl x509 -fingerprint -sha256` prints, with or
+// without a `sha256:` prefix, and return 64 uppercase hex digits.
+func normalizeFingerprint(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(strings.ToLower(s), "sha256:") {
+		s = s[len("sha256:"):]
+	}
+	var b strings.Builder
+	for _, c := range s {
+		switch {
+		case c == ':' || c == ' ':
+			continue
+		case unicode.Is(unicode.ASCII_Hex_Digit, c):
+			b.WriteRune(unicode.ToUpper(c))
+		default:
+			return "", fmt.Errorf("transport: invalid ssl_fingerprint %q: expected the certificate's SHA-256 fingerprint as hex digits", raw)
+		}
+	}
+	if b.Len() != 64 {
+		return "", fmt.Errorf("transport: invalid ssl_fingerprint %q: a SHA-256 fingerprint has 64 hex digits, got %d", raw, b.Len())
+	}
+	return b.String(), nil
 }
 
 func parseBool(s string) bool {

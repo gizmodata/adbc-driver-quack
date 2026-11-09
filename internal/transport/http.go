@@ -3,6 +3,10 @@ package transport
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -16,12 +20,27 @@ import (
 )
 
 // ErrServerError signals that the Quack server returned an explicit
-// ERROR_RESPONSE.
+// ERROR_RESPONSE. ExceptionType is DuckDB's exception type ("Catalog",
+// "Parser", "Constraint", ...), so callers can map it to an ADBC status.
 type ErrServerError struct {
-	Message string
+	Message       string
+	ExceptionType string
+	ExtraInfo     map[string]string
+	// MustInvalidate: the server's database is invalidated; the
+	// connection is a dead end.
+	MustInvalidate bool
 }
 
-func (e *ErrServerError) Error() string { return e.Message }
+func (e *ErrServerError) Error() string {
+	if e.ExceptionType != "" && !strings.Contains(e.Message, e.ExceptionType+" Error") {
+		return e.ExceptionType + " Error: " + e.Message
+	}
+	return e.Message
+}
+
+// UserAgent identifies the driver in HTTP requests. The driver package
+// sets it to include the release version.
+var UserAgent = "adbc-driver-quack"
 
 // HTTPTransport posts framed binary Quack messages to /quack over
 // HTTP(S) and returns the decoded server response.
@@ -52,19 +71,53 @@ func NewHTTPTransport(uri QuackURI) *HTTPTransport {
 	if requestTimeout <= 0 {
 		requestTimeout = DefaultRequestTimeout
 	}
+	httpTransport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   connectTimeout,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout: connectTimeout,
+		MaxIdleConnsPerHost: 4,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	if uri.TLS {
+		httpTransport.TLSClientConfig = tlsConfig(uri)
+	}
 	return &HTTPTransport{
 		uri: uri,
 		httpClient: &http.Client{
-			Timeout: requestTimeout,
-			Transport: &http.Transport{
-				DialContext: (&net.Dialer{
-					Timeout:   connectTimeout,
-					KeepAlive: 30 * time.Second,
-				}).DialContext,
-			},
+			Timeout:   requestTimeout,
+			Transport: httpTransport,
 		},
 		requestTimeout: requestTimeout,
 	}
+}
+
+// tlsConfig verifies the server against the system roots, or, with a
+// pinned fingerprint, trusts exactly the certificate whose SHA-256
+// fingerprint matches (DuckDB's ssl_fingerprint: how a client
+// authenticates a quack_serve self-signed certificate).
+func tlsConfig(uri QuackURI) *tls.Config {
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: uri.Host}
+	if uri.SSLFingerprint == "" {
+		return cfg
+	}
+	want := uri.SSLFingerprint
+	// The pin replaces chain and hostname verification, as in DuckDB's
+	// PinnedHttpsQuackClient; VerifyPeerCertificate still runs.
+	cfg.InsecureSkipVerify = true //nolint:gosec // replaced by the fingerprint check below
+	cfg.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+		if len(rawCerts) == 0 {
+			return errors.New("transport: server sent no TLS certificate")
+		}
+		sum := sha256.Sum256(rawCerts[0])
+		got := strings.ToUpper(hex.EncodeToString(sum[:]))
+		if got != want {
+			return fmt.Errorf("transport: server certificate fingerprint %s does not match the pinned ssl_fingerprint %s", got, want)
+		}
+		return nil
+	}
+	return cfg
 }
 
 // SetHTTPClient lets tests inject a custom client (e.g. with shorter timeouts).
@@ -98,6 +151,7 @@ func (t *HTTPTransport) Send(ctx context.Context, m message.QuackMessage) (messa
 		}
 		req.Header.Set("Content-Type", codec.DuckDBMIMEType)
 		req.Header.Set("Accept", codec.DuckDBMIMEType)
+		req.Header.Set("User-Agent", UserAgent)
 
 		resp, sendErr := t.httpClient.Do(req)
 		if sendErr != nil {
@@ -113,14 +167,24 @@ func (t *HTTPTransport) Send(ctx context.Context, m message.QuackMessage) (messa
 			return nil, fmt.Errorf("transport: read response from %s: %w", endpoint, readErr)
 		}
 		if resp.StatusCode/100 != 2 {
+			// The server puts the underlying DuckDB error in the
+			// EXCEPTION_WHAT header (with an empty body) on a non-2xx.
+			if what := strings.TrimSpace(resp.Header.Get("EXCEPTION_WHAT")); what != "" {
+				return nil, fmt.Errorf("transport: HTTP %d from %s: %s", resp.StatusCode, endpoint, what)
+			}
 			return nil, fmt.Errorf("transport: HTTP %d from %s", resp.StatusCode, endpoint)
 		}
 		decoded, decErr := message.DecodeMessage(respBody)
 		if decErr != nil {
 			return nil, fmt.Errorf("transport: decode response: %w", decErr)
 		}
-		if err, ok := decoded.(message.ErrorResponse); ok {
-			return nil, &ErrServerError{Message: err.Message}
+		if er, ok := decoded.(message.ErrorResponse); ok {
+			return nil, &ErrServerError{
+				Message:        er.Message,
+				ExceptionType:  er.ExceptionType,
+				ExtraInfo:      er.ExtraInfo,
+				MustInvalidate: er.MustInvalidate,
+			}
 		}
 		return decoded, nil
 	}

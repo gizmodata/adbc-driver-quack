@@ -1,71 +1,82 @@
 # CLAUDE.md
 
-Project notes for Claude and other contributors.
+Project notes for Claude and other contributors. (AGENTS.md is the same file for other agents.)
 
 ## What this is
 
-A Go-based [Apache Arrow ADBC](https://arrow.apache.org/adbc/) driver
-for [DuckDB's Quack remote protocol](https://duckdb.org/docs/current/quack/overview),
-distributed as a Go module and as a Python wheel
-(`pip install adbc-driver-quack`).
+A Go [Apache Arrow ADBC](https://arrow.apache.org/adbc/) driver for
+[DuckDB's Quack remote protocol](https://duckdb.org/docs/current/quack/overview),
+by GizmoData: a Go module, a Python wheel (`pip install adbc-driver-quack`) and a
+c-shared library attached to each GitHub Release. Stable since 1.0.0.
 
-Companion to [`gizmodata/quack-jdbc`](https://github.com/gizmodata/quack-jdbc)
-(JDBC driver, MIT, on Maven Central as `com.gizmodata:quack-jdbc`).
+It speaks **Quack protocol version 3, DuckDB 2.0's**. DuckDB 1.5's preview protocol
+(version 1) is not supported; 0.1.0a11 was the last release for it.
 
-## Reference material
+Companion: [`gizmodata/quack-jdbc`](https://github.com/gizmodata/quack-jdbc) (JDBC,
+still on the 1.5 protocol at the time of 1.0.0).
 
-Cached under `/tmp/adbc-ref/`:
-- `arrow-adbc/` — full shallow clone of `apache/arrow-adbc`. Read
-  `go/adbc/adbc.go` for interface contracts; `go/adbc/driver/flightsql/`
-  for the canonical Go driver shape; `go/adbc/validation/` for the
-  conformance suite to plug into `go test`; `go/adbc/pkg/_tmpl/` for the
-  cgo wrapper templates.
-- `adbc-driver-gizmosql/` — shape reference for Python-side packaging,
-  CI conventions, integration test conftest.
-- `duckdb_adbc.cpp`, `duckdb_adbc.h` — DuckDB's own ADBC driver (C++,
-  baked into duckdb/duckdb). See `Ingest()` at line 1215 for the
-  Arrow → DataChunk → appender pattern Quack mirrors via APPEND_REQUEST.
+## Protocol reference
 
-Java source to port from: `/Users/philip/LocalOnly/git/quack-jdbc/src/main/java/com/gizmodata/quack/jdbc/`.
+The protocol is defined by duckdb/duckdb-quack at the commit DuckDB pins in
+`.github/config/extensions/quack.cmake` (v2.0.0: `f96420ed`). The files that matter:
 
-The full research document lives at `/tmp/adbc-research.md` (584 lines)
-and `/tmp/duckdb-jdbc-metadata-notes.md` for the SQL queries to port
-into ADBC's `GetObjects`/`GetTableSchema`.
+- `src/include/quack_message.hpp`, `src/quack_message.cpp`, `src/serialize_quack_message.cpp`:
+  message types, field ids and defaults, the header + body + chunk-blob layout
+- `src/quack_server.cpp`: PREPARE (inline rows, `inline_rows = 0` for client data),
+  FETCH (dense batch index from 1 after PREPARE's inline batches, ack index, terminal
+  response with `total_batches`), SEND_DATA, CANCEL, heartbeat lease
+- `src/storage/quack_insert.cpp`, `src/quack_send_data.cpp`: the client-driven ingest
+  (`INSERT ... SELECT * FROM scan_data_from_quack_client(stream_id, NULL::STRUCT(...))`)
+- DuckDB's `Vector::Serialize` / `DataChunk::Serialize` with storage version V2_0_0
+  (VARCHAR as lengths + bytes blobs, fields 107-109; GEOMETRY format field 99)
 
-## Build order
-
-Pinned in CHANGELOG `[Unreleased]` and tracked in the task list. Roughly:
-
-1. Scaffold + CI placeholders (this commit)
-2. `internal/codec` — BinaryReader/Writer, Validity, HugeIntParts
-3. `internal/quacktype` — LogicalType, PhysicalType, ExtraTypeInfo
-4. `internal/message` — DataChunk, DecodedVector, MessageCodec, VectorCodec
-5. `internal/transport` — QuackURI, HTTP client (IPv4/IPv6 fallback)
-6. `driver/quack` — minimal ADBC read path
-7. `pkg/quack` — cgo wrapper
-8. `driver/quack` metadata methods
-9. Bulk ingest (Statement.Bind/BindStream + executeIngest)
-10. `python/` Python wheel + DBAPI
-11. Integration tests
-12. Packaging matrix CI
+When a DuckDB release ships, diff `quack_message.json` and the server handlers between
+the pinned commits, and run the full suites against the new `duckdb` package.
 
 ## Conventions
 
-- **Go 1.25 floor** (per `go.mod`). Use generics where they help;
-  avoid `any` when a concrete type fits.
-- **No `panic` across the cgo boundary.** Mirror flightsql's
-  `globalPoison` + `defer/recover` from the start.
-- **Apache Arrow Go pin: v18.** Match upstream flightsql and the ADBC
-  framework. Don't lag behind.
-- **Option naming:** `adbc.quack.<noun>` (e.g. `adbc.quack.token`,
-  `adbc.quack.tls`, `adbc.quack.rpc.timeout_seconds.fetch`).
-- **DriverInfoName / vendor string:** "ADBC Quack Driver - Go".
-- **Python floor:** `>=3.10`; pyarrow `>=14.0.1`.
+- **Go floor** per `go.mod` (1.26); CI builds with Go 1.27, whose oldest supported macOS
+  is 13.0, so the macOS wheel is tagged 13.0.
+- **No `panic` across the cgo boundary**; the generated wrapper recovers.
+- `pkg/quack/driver.go`, `utils.c`, `utils.h` are generated from arrow-adbc's
+  `go/adbc/pkg/_tmpl` (`go run ./gen -prefix Quack ...` in that module), with two local
+  edits: include paths and `exportRecordBatch` in `QuackArrayStreamGetNext`
+  (`array_export.go`; arrow-go's exporter drops extension arrays' storage children).
+- **Option naming:** `adbc.quack.<noun>`. Unknown database options are NOT_IMPLEMENTED.
+- **DriverInfoName:** "ADBC Quack Driver - Go"; `driver/quack/version.go` holds the version,
+  kept in sync with `python/adbc_driver_quack/_version.py`.
+- **Python floor:** 3.11 (3.10 reached end of life on 2026-10-01); pyarrow `>=14.0.1` on
+  purpose (library compatibility), test extras on the latest releases.
+- Arrow mapping mirrors DuckDB's own Arrow export/import: VARIANT is
+  `arrow.parquet.variant`, GEOMETRY `geoarrow.wkb`, UUID `arrow.uuid`. A value the target
+  type can't hold is an error, never a NULL or a string.
+- Errors: map DuckDB's exception type to an ADBC status + SQLSTATE (`driver/quack/errors.go`).
 
-## DBeaver compatibility — port from JDBC
+## Tests
 
-The SQL queries that drive ADBC's `Connection.GetObjects` /
-`GetTableSchema` / `GetTableTypes` should be lifted directly from
-`QuackDatabaseMetaData.java` in the JDBC repo. Those queries are in turn
-modeled query-for-query on DuckDB's own JDBC driver, so the
-introspection shape is consistent across DBeaver / DataGrip / etc.
+All gating suites need a DuckDB 2.0 Quack server and fail (never skip) without one in CI:
+
+```bash
+python scripts/quack_test_server.py --port 9494 --validation &   # duckdb >= 2.0
+ADBC_QUACK_TEST_URI=quack://127.0.0.1:9494 go test -race ./...    # unit, live, arrow-adbc validation
+pytest                                                             # Python suite (starts its own servers)
+cd validation && ADBC_QUACK_VALIDATION_URI=quack://127.0.0.1:9494 \
+    ADBC_QUACK_VALIDATION_TOKEN=adbc-driver-quack-it-token pytest  # adbc-drivers.org suite
+```
+
+- Test settings use `ADBC_QUACK_TEST_*` / `ADBC_QUACK_VALIDATION_*` names only.
+- The Hardcharger tests (`-m hardcharger`) use `ADBC_QUACK_TEST_HARDCHARGER_URI` (CI runs the
+  `ghcr.io/gizmodata/hardcharger` image with the built driver mounted) or the `hardcharger`
+  package; they fail if neither is available. macOS/Windows CI deselects them.
+- The conformance suite is a pinned test dependency only. GizmoData keeps ownership of this
+  repo: nothing is contributed to, registered with or generated by the adbc-drivers org's
+  tooling. `scripts/gen_validation_overrides.py` regenerates the bind overrides.
+- After a Go change, rebuild the c-shared library before Python tests:
+  `go build -buildmode=c-shared -tags driverlib -o pkg/quack/libadbc_driver_quack.dylib ./pkg/quack`
+  and copy it into `python/adbc_driver_quack/` (gitignored).
+
+## DBeaver compatibility
+
+`GetObjects` / `GetTableSchema` / `GetTableTypes` follow `QuackDatabaseMetaData.java` in the
+JDBC repo, modeled on DuckDB's own JDBC driver. Constraints come from `duckdb_constraints()`
+in declared column order.

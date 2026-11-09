@@ -137,7 +137,7 @@ func DecodeExtraTypeInfo(r *codec.BinaryReader) ExtraTypeInfo {
 				return codec.ReadList(rrr, func(_ int, rrrr *codec.BinaryReader) string { return rrrr.ReadString() })
 			})
 			if len(values) != valuesCount {
-				rr.AssertEOF() // force an error path
+				rr.Fail(fmt.Errorf("quacktype: ENUM has %d values, header says %d", len(values), valuesCount))
 			}
 			return EnumTypeInfo{Values: values, Alias: alias}
 		case ExtraTypeInfoTypeAggregateState:

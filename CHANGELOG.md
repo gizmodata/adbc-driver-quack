@@ -6,6 +6,101 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-09
+
+The first stable release, for DuckDB 2.0: the driver speaks Quack protocol version 3, the
+one DuckDB 2.0's quack extension serves. **DuckDB 1.5 servers (Quack protocol 1) are no
+longer supported**; pin `adbc-driver-quack==0.1.0a11` for those.
+
+### Added
+
+- **DuckDB 2.0 / Quack protocol 3**: the new message layout (header, body and a raw chunk
+  blob), random per-query ids, FETCH by dense batch index with acknowledgements and a
+  checked batch total (a short result is an error, never a truncated one), DuckDB 2.0's
+  VARCHAR vector encoding, and the TIMESTAMP_TZ_NS and TUPLE types.
+- **Ingest through SEND_DATA**: Arrow record batches are encoded straight into DuckDB
+  DataChunks and streamed into `INSERT ... SELECT * FROM scan_data_from_quack_client(...)`,
+  several 2,048-row chunks per request, the way DuckDB's own client writes to an attached
+  Quack database. Ingest now covers every Arrow type DuckDB's own Arrow import does
+  (string/binary views, large types, dictionaries, decimals of every width, all time and
+  timestamp units, durations and intervals, fixed-size binary, lists, list views,
+  fixed-size lists, structs, maps) with DuckDB's own type mapping, plus `catalog_name`.
+- **VARIANT** results as Arrow's canonical `arrow.parquet.variant` extension, byte-for-byte
+  what DuckDB's Arrow export (and so Hardcharger) returns, at any nesting depth; ingest of
+  `arrow.parquet.variant` columns into VARIANT. Members a Parquet Variant cannot hold
+  (INTERVAL, BIT, BIGNUM, TIMETZ, TIME_NS, integers over 38 digits) are an error naming the
+  type.
+- **GEOMETRY** as `geoarrow.wkb` (WKB, CRS in the extension metadata) and **UUID** as
+  `arrow.uuid`, both ways.
+- **TLS like DuckDB 2.0**: HTTPS by default for every host but localhost / 127.0.0.1 / ::1
+  (`adbc.quack.tls` overrides), and `adbc.quack.ssl_fingerprint` to pin a `quack_serve`
+  self-signed certificate. `quack:host:port` (DuckDB's spelling) is accepted as a URI.
+- **Heartbeat lease**: `adbc.quack.heartbeat_timeout_seconds` (default 60), renewed in the
+  background so idle connections survive; `adbc.quack.client_id`.
+- **Cancellation**: a cancelled or timed-out call cancels its statement on the server.
+- **ADBC 1.1 surface**: `GetOption`/`SetOption` on database, connection and statement,
+  current catalog and schema (`adbc.connection.catalog` / `db_schema`), `ExecuteSchema`
+  (which `adbc_scanner`'s `adbc_scan` needs), rows affected for INSERT/UPDATE/DELETE/MERGE
+  and ingest, UNIQUE constraints in `GetObjects`.
+- **Server errors with ADBC statuses and SQLSTATEs** from DuckDB's exception type: a missing
+  table is NOT_FOUND / 42S02, an existing one ALREADY_EXISTS / 42S01, a syntax error
+  INVALID_ARGUMENT / 42601, a constraint violation INTEGRITY / 23000. The `EXCEPTION_WHAT`
+  header is reported on HTTP failures.
+- **Conformance**: apache/arrow-adbc's Go validation suite and the adbc-drivers.org
+  conformance suite (`validation/`) run against a DuckDB 2.0 server in every CI run and gate
+  every release. Live Go tests for the heartbeat lease (with its negative twin) and for
+  multi-batch streaming.
+- **Hardcharger**: tests stream a Quack table (VARIANT and GEOMETRY included) into a live
+  Hardcharger and run `adbc_scanner` inside Hardcharger; the README documents both, and why
+  Hardcharger and Chargewire suit production.
+- Python 3.15 support, tested in CI. GizmoData branding, NOTICE, `docs/assets` logo.
+
+### Changed
+
+- Python 3.11 or later (3.10 reached end of life on 2026-10-01);
+  `adbc-driver-manager >= 1.13.0`; test extras on duckdb 2.0, pytest 9.2, pandas 3.1 and
+  hardcharger 2.10. Development Status: Production/Stable.
+- TIMESTAMP_S / _MS / _NS keep their units in Arrow (`timestamp[s/ms/ns]`), TIME_NS is
+  `time64[ns]`, TIMETZ is `time64[us]`.
+- Go: arrow-adbc 1.13.0, arrow-go 18.8.0, testify 1.12.1, x/* modules; Go 1.27.3 in CI
+  (`go.mod` floor 1.26).
+- Unknown database and statement options are NOT_IMPLEMENTED instead of being ignored;
+  closing a connection or statement twice is INVALID_STATE.
+- `GetInfo` reports the driver version, the server's DuckDB version (from the handshake,
+  without running a query) and the arrow-go version.
+- CI: a conformance job, a DuckDB 2.0 server for the Go suites, Hardcharger on Linux, a
+  wheel install check on AlmaLinux 8 (glibc 2.28), superseded runs cancelled,
+  documentation-only changes skipped, Node 24 action majors.
+
+### Fixed
+
+- **Naive TIMESTAMP columns came back tagged UTC** (`timestamp[us, tz=UTC]`): arrow-go's
+  `FixedWidthTypes.Timestamp_*` constants carry a time zone.
+- **TIMESTAMP_NS lost its nanoseconds** (returned as microseconds).
+- **Values nested in LIST/STRUCT/MAP** of type DATE, TIME, TIMESTAMP, UUID, INTERVAL or MAP
+  came back NULL; an unexpected value is now an error.
+- **ExecuteUpdate returned the number of result rows** (1) instead of the rows affected.
+- **Ingest after a same-named temporary table** wrote into the temporary table; targets are
+  now fully qualified.
+- **Multi-row parameter bindings** failed with "mismatch schema" when a row held a NULL;
+  bound values are cast to the bound column's type.
+- **GetObjects primary/foreign keys** listed columns in table order instead of declared order.
+- **GetTableSchema** guessed types from DuckDB's type names (TIMESTAMP_S, nested types and
+  unsigned integers came back wrong); it now uses the server's own types.
+- **Linux wheels** are built with `zig cc` against glibc 2.17, so the manylinux2014 tag is
+  true (they needed the build runner's glibc), and the **macOS wheel** is tagged
+  `macosx_13_0_arm64`: it claimed `universal2` with an arm64-only library inside, and macOS
+  12, which Go 1.27 does not support.
+- Exported VARIANT (and other extension) arrays no longer reach C Data consumers without
+  their storage children.
+- The Python test fixtures fail, instead of skipping, when the Quack server can't start.
+
+### Removed
+
+- DuckDB 1.5 / Quack protocol 1 support, and APPEND_REQUEST ingest (gone from the protocol).
+- Python 3.10.
+
+
 ## [0.1.0-alpha.11] — 2026-08-26
 
 ### Added

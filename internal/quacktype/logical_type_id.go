@@ -7,58 +7,60 @@ package quacktype
 type LogicalTypeID int
 
 const (
-	LogicalTypeIDInvalid         LogicalTypeID = 0
-	LogicalTypeIDSQLNull         LogicalTypeID = 1
-	LogicalTypeIDUnknown         LogicalTypeID = 2
-	LogicalTypeIDAny             LogicalTypeID = 3
-	LogicalTypeIDUnbound         LogicalTypeID = 4
-	LogicalTypeIDTemplate        LogicalTypeID = 5
-	LogicalTypeIDType            LogicalTypeID = 6
-	LogicalTypeIDBoolean         LogicalTypeID = 10
-	LogicalTypeIDTinyInt         LogicalTypeID = 11
-	LogicalTypeIDSmallInt        LogicalTypeID = 12
-	LogicalTypeIDInteger         LogicalTypeID = 13
-	LogicalTypeIDBigInt          LogicalTypeID = 14
-	LogicalTypeIDDate            LogicalTypeID = 15
-	LogicalTypeIDTime            LogicalTypeID = 16
-	LogicalTypeIDTimestampSec    LogicalTypeID = 17
-	LogicalTypeIDTimestampMS     LogicalTypeID = 18
-	LogicalTypeIDTimestamp       LogicalTypeID = 19
-	LogicalTypeIDTimestampNS     LogicalTypeID = 20
-	LogicalTypeIDDecimal         LogicalTypeID = 21
-	LogicalTypeIDFloat           LogicalTypeID = 22
-	LogicalTypeIDDouble          LogicalTypeID = 23
-	LogicalTypeIDChar            LogicalTypeID = 24
-	LogicalTypeIDVarchar         LogicalTypeID = 25
-	LogicalTypeIDBlob            LogicalTypeID = 26
-	LogicalTypeIDInterval        LogicalTypeID = 27
-	LogicalTypeIDUTinyInt        LogicalTypeID = 28
-	LogicalTypeIDUSmallInt       LogicalTypeID = 29
-	LogicalTypeIDUInteger        LogicalTypeID = 30
-	LogicalTypeIDUBigInt         LogicalTypeID = 31
-	LogicalTypeIDTimestampTZ     LogicalTypeID = 32
-	LogicalTypeIDTimeTZ          LogicalTypeID = 34
-	LogicalTypeIDTimeNS          LogicalTypeID = 35
-	LogicalTypeIDBit             LogicalTypeID = 36
-	LogicalTypeIDStringLiteral   LogicalTypeID = 37
-	LogicalTypeIDIntegerLiteral  LogicalTypeID = 38
-	LogicalTypeIDBigNum          LogicalTypeID = 39
-	LogicalTypeIDUHugeInt        LogicalTypeID = 49
-	LogicalTypeIDHugeInt         LogicalTypeID = 50
-	LogicalTypeIDPointer         LogicalTypeID = 51
-	LogicalTypeIDValidity        LogicalTypeID = 53
-	LogicalTypeIDUUID            LogicalTypeID = 54
-	LogicalTypeIDGeometry        LogicalTypeID = 60
-	LogicalTypeIDStruct          LogicalTypeID = 100
-	LogicalTypeIDList            LogicalTypeID = 101
-	LogicalTypeIDMap             LogicalTypeID = 102
-	LogicalTypeIDTable           LogicalTypeID = 103
-	LogicalTypeIDEnum            LogicalTypeID = 104
-	LogicalTypeIDAggregateState  LogicalTypeID = 105
-	LogicalTypeIDLambda          LogicalTypeID = 106
-	LogicalTypeIDUnion           LogicalTypeID = 107
-	LogicalTypeIDArray           LogicalTypeID = 108
-	LogicalTypeIDVariant         LogicalTypeID = 109
+	LogicalTypeIDInvalid        LogicalTypeID = 0
+	LogicalTypeIDSQLNull        LogicalTypeID = 1
+	LogicalTypeIDUnknown        LogicalTypeID = 2
+	LogicalTypeIDAny            LogicalTypeID = 3
+	LogicalTypeIDUnbound        LogicalTypeID = 4
+	LogicalTypeIDTemplate       LogicalTypeID = 5
+	LogicalTypeIDType           LogicalTypeID = 6
+	LogicalTypeIDBoolean        LogicalTypeID = 10
+	LogicalTypeIDTinyInt        LogicalTypeID = 11
+	LogicalTypeIDSmallInt       LogicalTypeID = 12
+	LogicalTypeIDInteger        LogicalTypeID = 13
+	LogicalTypeIDBigInt         LogicalTypeID = 14
+	LogicalTypeIDDate           LogicalTypeID = 15
+	LogicalTypeIDTime           LogicalTypeID = 16
+	LogicalTypeIDTimestampSec   LogicalTypeID = 17
+	LogicalTypeIDTimestampMS    LogicalTypeID = 18
+	LogicalTypeIDTimestamp      LogicalTypeID = 19
+	LogicalTypeIDTimestampNS    LogicalTypeID = 20
+	LogicalTypeIDDecimal        LogicalTypeID = 21
+	LogicalTypeIDFloat          LogicalTypeID = 22
+	LogicalTypeIDDouble         LogicalTypeID = 23
+	LogicalTypeIDChar           LogicalTypeID = 24
+	LogicalTypeIDVarchar        LogicalTypeID = 25
+	LogicalTypeIDBlob           LogicalTypeID = 26
+	LogicalTypeIDInterval       LogicalTypeID = 27
+	LogicalTypeIDUTinyInt       LogicalTypeID = 28
+	LogicalTypeIDUSmallInt      LogicalTypeID = 29
+	LogicalTypeIDUInteger       LogicalTypeID = 30
+	LogicalTypeIDUBigInt        LogicalTypeID = 31
+	LogicalTypeIDTimestampTZ    LogicalTypeID = 32
+	LogicalTypeIDTimestampTZNS  LogicalTypeID = 33 // DuckDB 2.0
+	LogicalTypeIDTimeTZ         LogicalTypeID = 34
+	LogicalTypeIDTimeNS         LogicalTypeID = 35
+	LogicalTypeIDBit            LogicalTypeID = 36
+	LogicalTypeIDStringLiteral  LogicalTypeID = 37
+	LogicalTypeIDIntegerLiteral LogicalTypeID = 38
+	LogicalTypeIDBigNum         LogicalTypeID = 39
+	LogicalTypeIDUHugeInt       LogicalTypeID = 49
+	LogicalTypeIDHugeInt        LogicalTypeID = 50
+	LogicalTypeIDPointer        LogicalTypeID = 51
+	LogicalTypeIDValidity       LogicalTypeID = 53
+	LogicalTypeIDUUID           LogicalTypeID = 54
+	LogicalTypeIDGeometry       LogicalTypeID = 60
+	LogicalTypeIDStruct         LogicalTypeID = 100
+	LogicalTypeIDList           LogicalTypeID = 101
+	LogicalTypeIDMap            LogicalTypeID = 102
+	LogicalTypeIDTable          LogicalTypeID = 103
+	LogicalTypeIDEnum           LogicalTypeID = 104
+	LogicalTypeIDAggregateState LogicalTypeID = 105
+	LogicalTypeIDLambda         LogicalTypeID = 106
+	LogicalTypeIDUnion          LogicalTypeID = 107
+	LogicalTypeIDArray          LogicalTypeID = 108
+	LogicalTypeIDVariant        LogicalTypeID = 109
+	LogicalTypeIDTuple          LogicalTypeID = 110 // DuckDB 2.0: unnamed STRUCT
 )
 
 var logicalTypeIDNames = map[LogicalTypeID]string{
@@ -85,9 +87,10 @@ var logicalTypeIDNames = map[LogicalTypeID]string{
 	LogicalTypeIDUUID: "UUID", LogicalTypeIDGeometry: "GEOMETRY",
 	LogicalTypeIDStruct: "STRUCT", LogicalTypeIDList: "LIST",
 	LogicalTypeIDMap: "MAP", LogicalTypeIDTable: "TABLE",
-	LogicalTypeIDEnum: "ENUM", LogicalTypeIDAggregateState: "AGGREGATE_STATE",
+	LogicalTypeIDEnum: "ENUM", LogicalTypeIDAggregateState: "LEGACY_AGGREGATE_STATE",
 	LogicalTypeIDLambda: "LAMBDA", LogicalTypeIDUnion: "UNION",
 	LogicalTypeIDArray: "ARRAY", LogicalTypeIDVariant: "VARIANT",
+	LogicalTypeIDTimestampTZNS: "TIMESTAMP_TZ_NS", LogicalTypeIDTuple: "TUPLE",
 }
 
 func (id LogicalTypeID) String() string {
@@ -158,18 +161,18 @@ func (p PhysicalType) ByteWidth() int {
 type ExtraTypeInfoType int
 
 const (
-	ExtraTypeInfoTypeInvalid         ExtraTypeInfoType = 0
-	ExtraTypeInfoTypeGeneric         ExtraTypeInfoType = 1
-	ExtraTypeInfoTypeDecimal         ExtraTypeInfoType = 2
-	ExtraTypeInfoTypeString          ExtraTypeInfoType = 3
-	ExtraTypeInfoTypeList            ExtraTypeInfoType = 4
-	ExtraTypeInfoTypeStruct          ExtraTypeInfoType = 5
-	ExtraTypeInfoTypeEnum            ExtraTypeInfoType = 6
-	ExtraTypeInfoTypeUnbound         ExtraTypeInfoType = 7
-	ExtraTypeInfoTypeAggregateState  ExtraTypeInfoType = 8
-	ExtraTypeInfoTypeArray           ExtraTypeInfoType = 9
-	ExtraTypeInfoTypeAny             ExtraTypeInfoType = 10
-	ExtraTypeInfoTypeIntegerLiteral  ExtraTypeInfoType = 11
-	ExtraTypeInfoTypeTemplate        ExtraTypeInfoType = 12
-	ExtraTypeInfoTypeGeo             ExtraTypeInfoType = 13
+	ExtraTypeInfoTypeInvalid        ExtraTypeInfoType = 0
+	ExtraTypeInfoTypeGeneric        ExtraTypeInfoType = 1
+	ExtraTypeInfoTypeDecimal        ExtraTypeInfoType = 2
+	ExtraTypeInfoTypeString         ExtraTypeInfoType = 3
+	ExtraTypeInfoTypeList           ExtraTypeInfoType = 4
+	ExtraTypeInfoTypeStruct         ExtraTypeInfoType = 5
+	ExtraTypeInfoTypeEnum           ExtraTypeInfoType = 6
+	ExtraTypeInfoTypeUnbound        ExtraTypeInfoType = 7
+	ExtraTypeInfoTypeAggregateState ExtraTypeInfoType = 8
+	ExtraTypeInfoTypeArray          ExtraTypeInfoType = 9
+	ExtraTypeInfoTypeAny            ExtraTypeInfoType = 10
+	ExtraTypeInfoTypeIntegerLiteral ExtraTypeInfoType = 11
+	ExtraTypeInfoTypeTemplate       ExtraTypeInfoType = 12
+	ExtraTypeInfoTypeGeo            ExtraTypeInfoType = 13
 )

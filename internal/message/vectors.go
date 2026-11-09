@@ -158,6 +158,10 @@ type DataChunk struct {
 	RowCount int
 	Types    []quacktype.LogicalType
 	Columns  []DecodedVector
+	// Raw, when set, is the chunk already serialized as one DuckDB
+	// DataChunk object (ingest encodes Arrow straight to the wire).
+	// EncodeDataChunk writes it as is; Types/Columns are ignored.
+	Raw []byte
 }
 
 // IntervalValue mirrors DuckDB's INTERVAL (months + days + microseconds).

@@ -19,8 +19,80 @@ func TestParseBasicURL(t *testing.T) {
 	if u.Port != 9494 {
 		t.Errorf("port: got %d", u.Port)
 	}
-	if u.TLS {
-		t.Errorf("tls: expected false")
+	if !u.TLS {
+		t.Errorf("tls: a non-local host defaults to HTTPS, as DuckDB 2.0 does")
+	}
+	if u.HeartbeatTimeout != DefaultHeartbeatTimeout {
+		t.Errorf("heartbeat: got %v", u.HeartbeatTimeout)
+	}
+}
+
+func TestTLSDefaultsFollowDuckDB(t *testing.T) {
+	cases := []struct {
+		url  string
+		opts map[string]string
+		tls  bool
+	}{
+		{"quack://localhost", nil, false},
+		{"quack://127.0.0.1:9494", nil, false},
+		{"quack://[::1]:9494", nil, false},
+		{"quack:localhost:9494", nil, false},
+		{"quack://db.example.com", nil, true},
+		{"quack://db.example.com?tls=false", nil, false},
+		{"quack://db.example.com", map[string]string{"adbc.quack.tls": "false"}, false},
+		{"quack://localhost?tls=true", nil, true},
+		{"quack://localhost", map[string]string{"adbc.quack.ssl_fingerprint": strings.Repeat("ab", 32)}, true},
+	}
+	for _, tc := range cases {
+		u, err := ParseURI(tc.url, tc.opts)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.url, err)
+		}
+		if u.TLS != tc.tls {
+			t.Errorf("%s %v: tls = %v, want %v", tc.url, tc.opts, u.TLS, tc.tls)
+		}
+	}
+}
+
+func TestDuckDBSpellingParses(t *testing.T) {
+	u, err := ParseURI("quack:db.example.com:7000", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Host != "db.example.com" || u.Port != 7000 {
+		t.Errorf("got %s:%d", u.Host, u.Port)
+	}
+}
+
+func TestFingerprintNormalization(t *testing.T) {
+	colon := "SHA256:2b:31:f0:" + strings.TrimSuffix(strings.Repeat("aa:", 29), ":")
+	u, err := ParseURI("quack://h", map[string]string{"adbc.quack.ssl_fingerprint": colon})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.SSLFingerprint != "2B31F0"+strings.Repeat("AA", 29) {
+		t.Errorf("got %q", u.SSLFingerprint)
+	}
+	for _, bad := range []string{"zz", strings.Repeat("ab", 31)} {
+		if _, err := ParseURI("quack://h", map[string]string{"adbc.quack.ssl_fingerprint": bad}); err == nil {
+			t.Errorf("%q: expected an error", bad)
+		}
+	}
+	if _, err := ParseURI("quack://h?tls=false", map[string]string{"adbc.quack.ssl_fingerprint": strings.Repeat("ab", 32)}); err == nil {
+		t.Error("tls=false with a pinned fingerprint must be refused")
+	}
+}
+
+func TestClientIDAndHeartbeatOptions(t *testing.T) {
+	u, err := ParseURI("quack://h", map[string]string{"adbc.quack.client_id": "etl-1", "adbc.quack.heartbeat_timeout_seconds": "30"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.ClientID != "etl-1" || u.HeartbeatTimeout != 30*time.Second {
+		t.Errorf("got %q %v", u.ClientID, u.HeartbeatTimeout)
+	}
+	if _, err := ParseURI("quack://h", map[string]string{"adbc.quack.client_id": "abc"}); err == nil {
+		t.Error("a client_id under 4 characters must be refused")
 	}
 }
 

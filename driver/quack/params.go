@@ -88,6 +88,8 @@ func scalarAt(col arrow.Array, i int) (any, error) {
 		return uint64(a.Value(i)), nil
 	case *array.Uint64:
 		return a.Value(i), nil
+	case *array.Float16:
+		return float64(a.Value(i).Float32()), nil
 	case *array.Float32:
 		return float64(a.Value(i)), nil
 	case *array.Float64:
@@ -104,6 +106,8 @@ func scalarAt(col arrow.Array, i int) (any, error) {
 		return bytes.Clone(a.Value(i)), nil
 	case *array.LargeBinary:
 		return bytes.Clone(a.Value(i)), nil
+	case *array.BinaryView:
+		return bytes.Clone(a.Value(i)), nil
 	case *array.FixedSizeBinary:
 		return bytes.Clone(a.Value(i)), nil
 	case *array.Decimal128:
@@ -117,17 +121,37 @@ func scalarAt(col arrow.Array, i int) (any, error) {
 	case *array.Time32:
 		return sqlKeyword("TIME '" + a.Value(i).ToTime(a.DataType().(*arrow.Time32Type).Unit).Format("15:04:05.999999999") + "'"), nil
 	case *array.Time64:
-		return sqlKeyword("TIME '" + a.Value(i).ToTime(a.DataType().(*arrow.Time64Type).Unit).Format("15:04:05.999999999") + "'"), nil
+		unit := a.DataType().(*arrow.Time64Type).Unit
+		kw := "TIME"
+		if unit == arrow.Nanosecond {
+			kw = "TIME_NS"
+		}
+		return sqlKeyword(kw + " '" + a.Value(i).ToTime(unit).Format("15:04:05.999999999") + "'"), nil
 	case *array.Timestamp:
 		dt := a.DataType().(*arrow.TimestampType)
-		t := a.Value(i).ToTime(dt.Unit)
-		if dt.TimeZone != "" {
-			if loc, err := dt.GetZone(); err == nil {
-				t = t.In(loc)
+		if dt.Unit == arrow.Nanosecond {
+			// Built from the epoch value, not a string: exact, and it
+			// reaches the whole TIMESTAMP_NS range.
+			lit := fmt.Sprintf("make_timestamp_ns(%d)", int64(a.Value(i)))
+			if dt.TimeZone != "" {
+				lit = "(" + lit + " AT TIME ZONE 'UTC')"
 			}
-			return sqlKeyword("TIMESTAMPTZ '" + t.Format("2006-01-02 15:04:05.999999999-07:00") + "'"), nil
+			return sqlKeyword(lit), nil
 		}
-		return sqlKeyword("TIMESTAMP '" + t.UTC().Format("2006-01-02 15:04:05.999999999") + "'"), nil
+		t := a.Value(i).ToTime(dt.Unit).UTC()
+		// The literal's type matches the bound unit, so a nanosecond value
+		// near TIMESTAMP_NS's range limits is never routed through a
+		// microsecond TIMESTAMP.
+		if dt.TimeZone != "" {
+			kw := "TIMESTAMPTZ"
+			if dt.Unit == arrow.Nanosecond {
+				kw = "TIMESTAMPTZ_NS"
+			}
+			return sqlKeyword(kw + " '" + t.Format("2006-01-02 15:04:05.999999999") + "+00'"), nil
+		}
+		kw := map[arrow.TimeUnit]string{arrow.Second: "TIMESTAMP_S", arrow.Millisecond: "TIMESTAMP_MS",
+			arrow.Microsecond: "TIMESTAMP", arrow.Nanosecond: "TIMESTAMP_NS"}[dt.Unit]
+		return sqlKeyword(kw + " '" + t.Format("2006-01-02 15:04:05.999999999") + "'"), nil
 	case *array.Dictionary:
 		return scalarAt(a.Dictionary(), a.GetValueIndex(i))
 	case *array.Null:
@@ -194,10 +218,37 @@ func renderLiteral(v any) string {
 // substituteParams replaces each top-level `?` in sql with the
 // corresponding literal from values. Question marks inside string
 // literals, quoted identifiers, and comments are left alone.
-func substituteParams(sql string, values []any) (string, error) {
-	var b strings.Builder
-	b.Grow(len(sql) + 16*len(values))
+//
+// types, when given, holds the DuckDB SQL type of each bound column: each
+// literal is then cast to it, so NULLs and narrow integers keep the bound
+// Arrow type and every bound row's result has the same schema.
+func substituteParams(sql string, values []any, types []string) (string, error) {
 	idx := 0
+	out, err := replaceParamMarkers(sql, func() (string, error) {
+		if idx >= len(values) {
+			return "", fmt.Errorf("statement has more parameter markers than bound values (%d)", len(values))
+		}
+		idx++
+		lit := renderLiteral(values[idx-1])
+		if idx-1 < len(types) && types[idx-1] != "" {
+			lit = "CAST(" + lit + " AS " + types[idx-1] + ")"
+		}
+		return lit, nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if idx != len(values) {
+		return "", fmt.Errorf("statement has %d parameter markers but %d values were bound", idx, len(values))
+	}
+	return out, nil
+}
+
+// replaceParamMarkers replaces each top-level `?` with what marker
+// returns, leaving string literals, quoted identifiers and comments alone.
+func replaceParamMarkers(sql string, marker func() (string, error)) (string, error) {
+	var b strings.Builder
+	b.Grow(len(sql) + 16)
 	inStr, inIdent, lineComment, blockComment := false, false, false, false
 	for i := 0; i < len(sql); i++ {
 		c := sql[i]
@@ -237,17 +288,14 @@ func substituteParams(sql string, values []any) (string, error) {
 			blockComment = true
 			b.WriteByte(c)
 		case c == '?':
-			if idx >= len(values) {
-				return "", fmt.Errorf("statement has more parameter markers than bound values (%d)", len(values))
+			lit, err := marker()
+			if err != nil {
+				return "", err
 			}
-			b.WriteString(renderLiteral(values[idx]))
-			idx++
+			b.WriteString(lit)
 		default:
 			b.WriteByte(c)
 		}
-	}
-	if idx != len(values) {
-		return "", fmt.Errorf("statement has %d parameter markers but %d values were bound", idx, len(values))
 	}
 	return b.String(), nil
 }
@@ -255,15 +303,16 @@ func substituteParams(sql string, values []any) (string, error) {
 // executeBoundQuery runs the statement once per bound row and returns
 // the concatenated result (single-row bindings stream as usual).
 func (s *statementImpl) executeBoundQuery(ctx context.Context) (array.RecordReader, int64, error) {
-	rows, _, err := s.boundRows()
+	rows, schema, err := s.boundRows()
 	if err != nil {
 		return nil, -1, err
 	}
+	types := bindTypes(schema)
 	if len(rows) == 0 {
 		return nil, -1, errStatus(adbc.StatusInvalidArgument, "bind: no parameter rows bound")
 	}
 	if len(rows) == 1 {
-		sql, err := substituteParams(s.sql, rows[0])
+		sql, err := substituteParams(s.sql, rows[0], types)
 		if err != nil {
 			return nil, -1, errStatus(adbc.StatusInvalidArgument, "bind: %v", err)
 		}
@@ -282,14 +331,14 @@ func (s *statementImpl) executeBoundQuery(ctx context.Context) (array.RecordRead
 		return reader, -1, nil
 	}
 	var recs []arrow.Record
-	var schema *arrow.Schema
+	schema = nil
 	release := func() {
 		for _, r := range recs {
 			r.Release()
 		}
 	}
 	for _, row := range rows {
-		sql, err := substituteParams(s.sql, row)
+		sql, err := substituteParams(s.sql, row, types)
 		if err != nil {
 			release()
 			return nil, -1, errStatus(adbc.StatusInvalidArgument, "bind: %v", err)
@@ -310,6 +359,27 @@ func (s *statementImpl) executeBoundQuery(ctx context.Context) (array.RecordRead
 		}
 		for rr.Next() {
 			rec := rr.RecordBatch()
+			if !rec.Schema().Equal(schema) {
+				// Each row ran as its own statement, so a column named after
+				// its expression ("CAST(42 AS BIGINT)") differs per row. The
+				// literals are cast to the bound types, so the types agree:
+				// relabel to the first row's schema.
+				if len(rec.Columns()) != schema.NumFields() {
+					rr.Release()
+					release()
+					return nil, -1, errStatus(adbc.StatusInvalidState, "bind: bound rows returned different column counts")
+				}
+				for i, col := range rec.Columns() {
+					if !arrow.TypeEqual(col.DataType(), schema.Field(i).Type) {
+						rr.Release()
+						release()
+						return nil, -1, errStatus(adbc.StatusInvalidState,
+							"bind: column %d is %s for one bound row and %s for another", i, schema.Field(i).Type, col.DataType())
+					}
+				}
+				recs = append(recs, array.NewRecordBatch(schema, rec.Columns(), rec.NumRows()))
+				continue
+			}
 			rec.Retain()
 			recs = append(recs, rec)
 		}
@@ -330,13 +400,14 @@ func (s *statementImpl) executeBoundQuery(ctx context.Context) (array.RecordRead
 
 // executeBoundUpdate runs the statement once per bound row.
 func (s *statementImpl) executeBoundUpdate(ctx context.Context) (int64, error) {
-	rows, _, err := s.boundRows()
+	rows, schema, err := s.boundRows()
 	if err != nil {
 		return -1, err
 	}
+	types := bindTypes(schema)
 	var total int64
 	for _, row := range rows {
-		sql, err := substituteParams(s.sql, row)
+		sql, err := substituteParams(s.sql, row, types)
 		if err != nil {
 			return -1, errStatus(adbc.StatusInvalidArgument, "bind: %v", err)
 		}
@@ -349,4 +420,19 @@ func (s *statementImpl) executeBoundUpdate(ctx context.Context) (int64, error) {
 		}
 	}
 	return total, nil
+}
+
+// bindTypes is the DuckDB SQL type of each bound column ("" when the Arrow
+// type has no DuckDB equivalent, which leaves that literal uncast).
+func bindTypes(schema *arrow.Schema) []string {
+	if schema == nil {
+		return nil
+	}
+	out := make([]string, schema.NumFields())
+	for i, f := range schema.Fields() {
+		if t, err := duckDBTypeForArrow(f.Type); err == nil {
+			out[i] = t
+		}
+	}
+	return out
 }

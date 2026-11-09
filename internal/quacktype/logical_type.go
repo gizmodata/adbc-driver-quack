@@ -231,7 +231,8 @@ func GetPhysicalType(t LogicalType) PhysicalType {
 		return PhysicalTypeUint32
 	case LogicalTypeIDBigInt, LogicalTypeIDTime, LogicalTypeIDTimeNS,
 		LogicalTypeIDTimestamp, LogicalTypeIDTimestampSec, LogicalTypeIDTimestampNS,
-		LogicalTypeIDTimestampMS, LogicalTypeIDTimeTZ, LogicalTypeIDTimestampTZ:
+		LogicalTypeIDTimestampMS, LogicalTypeIDTimeTZ, LogicalTypeIDTimestampTZ,
+		LogicalTypeIDTimestampTZNS:
 		return PhysicalTypeInt64
 	case LogicalTypeIDUBigInt:
 		return PhysicalTypeUint64
@@ -251,7 +252,7 @@ func GetPhysicalType(t LogicalType) PhysicalType {
 		return PhysicalTypeVarchar
 	case LogicalTypeIDInterval:
 		return PhysicalTypeInterval
-	case LogicalTypeIDUnion, LogicalTypeIDVariant, LogicalTypeIDStruct:
+	case LogicalTypeIDUnion, LogicalTypeIDVariant, LogicalTypeIDStruct, LogicalTypeIDTuple:
 		return PhysicalTypeStruct
 	case LogicalTypeIDList, LogicalTypeIDMap:
 		return PhysicalTypeList
@@ -336,4 +337,14 @@ func getEnumPhysicalType(t LogicalType) PhysicalType {
 		return PhysicalTypeUint16
 	}
 	return PhysicalTypeUint32
+}
+
+// StructFieldKey is the key a decoded STRUCT/TUPLE row map uses for child
+// i: the child's name, or "#i" for the unnamed children of a TUPLE (whose
+// names are all empty, so the name alone would collide).
+func StructFieldKey(children []ChildType, i int) string {
+	if children[i].Name != "" {
+		return children[i].Name
+	}
+	return fmt.Sprintf("#%d", i)
 }

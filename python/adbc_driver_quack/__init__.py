@@ -41,8 +41,22 @@ class DatabaseOptions(enum.Enum):
     #: Accepted only as an option, never as a URL query parameter.
     TOKEN_FILE = "adbc.quack.token_file"
 
-    #: Set to "true" to use HTTPS for the underlying transport.
+    #: "true" for HTTPS, "false" for plain HTTP. Unset follows DuckDB 2.0:
+    #: plain HTTP to localhost / 127.0.0.1 / ::1, HTTPS to any other host.
     TLS = "adbc.quack.tls"
+
+    #: SHA-256 fingerprint of the one server certificate to trust instead of
+    #: CA verification (how a client authenticates a quack_serve self-signed
+    #: certificate). Implies TLS. Accepts the colon-separated form openssl prints.
+    SSL_FINGERPRINT = "adbc.quack.ssl_fingerprint"
+
+    #: Connection lease requested from the server, in seconds (default 60).
+    #: The driver renews it with a background heartbeat while idle.
+    HEARTBEAT_TIMEOUT = "adbc.quack.heartbeat_timeout_seconds"
+
+    #: Opaque client identifier shown (hashed) in the server's
+    #: quack_active_connections(). Empty, or at least 4 characters.
+    CLIENT_ID = "adbc.quack.client_id"
 
     #: HTTP connect timeout: seconds, or a Go duration like "1.5s" (default 10).
     CONNECT_TIMEOUT = "adbc.quack.rpc.timeout_seconds.connect"
