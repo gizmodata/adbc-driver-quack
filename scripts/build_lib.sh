@@ -7,11 +7,17 @@
 # (https://adbc-drivers.org/building-drivers/shared-library-requirements.html).
 # The export lists live next to the package: exports_linux.map (version
 # script), exports_darwin.txt (ld64 exported-symbols list) and
-# exports_windows.def. On Windows, -Wl,--export-all-symbols makes Go skip its
-# own .def file (which lists every //export function, e.g. QuackDatabaseNew)
-# and --exclude-all-symbols then turns automatic exporting off again, so the
-# DLL exports what the C code marks dllexport (the Adbc* wrappers) plus our
-# .def. go run ./scripts/checkexports verifies the result.
+# exports_windows.def.
+#
+# Windows: Go's linker writes its own .def file listing every //export
+# function (QuackDatabaseNew, ...) unless its extldflags contain the exact
+# string "-Wl,--export-all-symbols" (cmd/link/internal/ld/lib.go). The "-L"
+# in front makes the C compiler driver read that string as a library search
+# directory, so the linker never sees it: GNU ld and LLVM lld (whose
+# --export-all-symbols would override everything) then export only what the
+# C code marks dllexport (the Adbc* wrappers) plus exports_windows.def (the
+# Go-exported entrypoints). go run ./scripts/checkexports verifies the
+# result; it fails the build if Go ever changes this.
 #
 # Usage: scripts/build_lib.sh [output path]
 # CC, CGO_CFLAGS and the like pass through to go build.
@@ -36,7 +42,7 @@ fi
 case "$goos" in
   linux)   extld="-Wl,--version-script=$dir/exports_linux.map" ;;
   darwin)  extld="-Wl,-exported_symbols_list,$dir/exports_darwin.txt" ;;
-  windows) extld="-Wl,--export-all-symbols -Wl,--exclude-all-symbols $dir/exports_windows.def" ;;
+  windows) extld="-L -Wl,--export-all-symbols $dir/exports_windows.def" ;;
 esac
 
 CGO_ENABLED=1 go build -buildmode=c-shared -tags driverlib \
