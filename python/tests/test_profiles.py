@@ -75,7 +75,7 @@ uri = "{quack_server.uri}"
 def test_extra_http_headers_full_stack(quack_server):
     """Header options flow through the whole stack without breaking
     the protocol (the server ignores unknown headers)."""
-    import adbc_driver_quack.dbapi as quack
+    from adbc_driver_quack import dbapi as quack
 
     with quack.connect(
         uri=quack_server.uri,
@@ -90,7 +90,7 @@ def test_extra_http_headers_full_stack(quack_server):
 
 def test_extra_http_headers_rejected_on_url(quack_server):
     """A pasted URL cannot inject headers — parse-time rejection."""
-    import adbc_driver_quack.dbapi as quack
+    from adbc_driver_quack import dbapi as quack
 
     with pytest.raises(Exception, match="not a URL query parameter"):
         quack.connect(

@@ -54,7 +54,7 @@ def install_adbc_scanner(run: Callable[[str], list[tuple]]) -> None:
 
 @pytest.fixture()
 def sample_table(quack_server):
-    import adbc_driver_quack.dbapi as quack
+    from adbc_driver_quack import dbapi as quack
 
     with quack.connect(quack_server.uri, db_kwargs=quack_server.db_kwargs, autocommit=True) as c, c.cursor() as cur:
         cur.execute(
@@ -137,7 +137,7 @@ def test_adbc_scan_runs_quack_sql(engine):
 
 
 def test_writes_into_quack(engine, quack_server):
-    import adbc_driver_quack.dbapi as quack
+    from adbc_driver_quack import dbapi as quack
 
     engine.run("CREATE OR REPLACE TEMP TABLE local_rows AS SELECT i AS id FROM range(7) t(i)")
     # CTAS through the attached catalog...
