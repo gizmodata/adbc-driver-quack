@@ -18,9 +18,8 @@ LIB := libadbc_driver_quack.$(SUFFIX)
 .PHONY: all clean
 all: $(LIB)
 
-$(LIB): driver.go init.go utils.c utils.h adbc.h ../../go.mod ../../go.sum
-	cd ../.. && go build -buildmode=c-shared -tags driverlib \
-		-o pkg/quack/$(LIB) ./pkg/quack
+$(LIB): driver.go init.go utils.c utils.h adbc.h exports_linux.map exports_darwin.txt exports_windows.def ../../go.mod ../../go.sum ../../scripts/build_lib.sh
+	../../scripts/build_lib.sh pkg/quack/$(LIB)
 
 clean:
 	rm -f $(LIB) libadbc_driver_quack.h

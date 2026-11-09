@@ -35,7 +35,13 @@ def test_readme_quickstart_step3_connect_and_query(quack_server):
         assert table.column("greeting").to_pylist() == ["hello duckdb"]
 
 
-def test_readme_alternative_manager_pattern(quack_server):
+@pytest.mark.parametrize(
+    "entrypoint",
+    # QuackDriverInit is the deprecated alias older manifests and docs name;
+    # None lets the driver manager derive the entrypoint from the file name.
+    ["AdbcDriverQuackInit", "QuackDriverInit", None],
+)
+def test_readme_alternative_manager_pattern(quack_server, entrypoint):
     """README "Alternative: drive adbc_driver_manager directly".
 
     Verifies that passing the bundled driver path + entrypoint to
@@ -46,7 +52,7 @@ def test_readme_alternative_manager_pattern(quack_server):
 
     with dbapi.connect(
         driver=adbc_driver_quack._driver_path(),
-        entrypoint="QuackDriverInit",
+        entrypoint=entrypoint,
         db_kwargs={
             "uri": quack_server.uri,
             **quack_server.db_kwargs,

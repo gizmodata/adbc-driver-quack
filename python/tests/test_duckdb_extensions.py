@@ -106,7 +106,7 @@ def engine(request, quack_server, driver_path, sample_table):
                 TYPE adbc,
                 SCOPE {lit(quack_server.uri)},
                 driver {lit(library)},
-                entrypoint 'QuackDriverInit',
+                entrypoint 'AdbcDriverQuackInit',
                 uri {lit(quack_server.uri)},
                 extra_options MAP {{'adbc.quack.token': {lit(quack_server.token)}}}
             )"""
