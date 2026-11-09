@@ -24,8 +24,9 @@ client: just `pip install`.
 Distributed as:
 - a Go module: `github.com/gizmodata/adbc-driver-quack`
 - a `pip install adbc-driver-quack` wheel for Python 3.11 to 3.15 (macOS / Linux / Windows × x64 / arm64)
-- a c-shared library (`libadbc_driver_quack.{so,dylib,dll}`) attached to each GitHub
-  Release, for C / C++ / Rust / R / driver-manifest consumers and DuckDB's `adbc_scanner`
+- a c-shared library (`libadbc_driver_quack.{so,dylib,dll}`, one `.tar.gz` per platform)
+  attached to each GitHub Release, for C / C++ / Rust / R / driver-manifest consumers and
+  DuckDB's `adbc_scanner`
 
 > **Status: stable (1.0).** Speaks Quack protocol version 3, the one DuckDB 2.0 ships. It
 > passes [apache/arrow-adbc's Go validation suite and the adbc-drivers.org conformance
@@ -121,7 +122,7 @@ func main() {
 ```
 
 You can also skip the wrapper and point `adbc_driver_manager.dbapi.connect` at the bundled
-library (`driver=adbc_driver_quack._driver_path(), entrypoint="QuackDriverInit"`), or, after
+library (`driver=adbc_driver_quack._driver_path(), entrypoint="AdbcDriverQuackInit"`), or, after
 `python -m adbc_driver_quack install-manifest`, at the driver by name
 ([below](#connection-profiles--driver-manifests)).
 
@@ -436,6 +437,13 @@ Every CI run, and so every release, passes:
   parameters), and negative decimal scales (DuckDB has none). DuckDB-specific expectations
   (TIME is microsecond precision, `BLOB` takes no length, TIMESTAMP_NS reserves its INT64
   extremes) live in `validation/queries/`, each with the reason.
+
+The c-shared library also meets the
+[ADBC shared-library requirements](https://adbc-drivers.org/building-drivers/shared-library-requirements.html):
+it links only system libraries, needs glibc 2.17 or macOS 13, and exports only `Adbc*`
+symbols (`AdbcDriverInit`, `AdbcDriverQuackInit` and the ADBC API), plus the deprecated
+`QuackDriverInit` alias that manifests from before 1.0.3 name. CI checks every build with
+`go run ./scripts/checkexports`.
 
 Run them yourself:
 

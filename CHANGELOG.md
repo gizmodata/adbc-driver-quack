@@ -6,6 +6,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-11-09
+
+The c-shared library now meets the
+[ADBC shared-library requirements](https://adbc-drivers.org/building-drivers/shared-library-requirements.html).
+
+### Changed
+
+- **The library exports only `Adbc*` symbols**, plus the deprecated `QuackDriverInit` alias.
+  The wrapper's own Go exports (`QuackDatabaseNew`, ...) and cgo's glue are no longer
+  visible to other libraries in the process. They are hidden by a linker export list per
+  platform (`pkg/quack/exports_*`), applied by `scripts/build_lib.sh`, which CI, the Makefile
+  and local builds all use. CI checks each build with `go run ./scripts/checkexports`.
+- **The Python package and the driver manifest load the driver through `AdbcDriverQuackInit`**,
+  the entrypoint the driver manager derives from the file name. `QuackDriverInit` still works
+  (manifests written by earlier releases name it) and will be removed at the next major
+  version.
+- **GitHub Release libraries come as one `libadbc_driver_quack-<os>-<arch>.tar.gz` per
+  platform**, holding `libadbc_driver_quack.<ext>` with LICENSE and NOTICE. The previous
+  platform-suffixed file names (`libadbc_driver_quack-linux-amd64.so`) did not match the
+  entrypoint the driver manager derives from a file name.
+
 ## [1.0.2] - 2026-11-09
 
 ### Fixed

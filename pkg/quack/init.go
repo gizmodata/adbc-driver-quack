@@ -27,8 +27,10 @@ package main
 // #include <string.h>
 import "C"
 
-// QuackDriverInit is the canonical short-form C ABI entrypoint, parallel
-// to FlightSQLDriverInit / SnowflakeDriverInit / etc.
+// QuackDriverInit is a deprecated alias of AdbcDriverQuackInit, kept
+// exported because manifests and docs from releases before 1.0.3 name it.
+// It is the one export without the Adbc prefix (scripts/checkexports
+// -allow); remove it at the next major version.
 //
 //export QuackDriverInit
 func QuackDriverInit(version C.int, rawDriver *C.void, err *C.struct_AdbcError) C.AdbcStatusCode {

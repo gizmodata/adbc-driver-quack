@@ -101,8 +101,7 @@ jobs:
             Windows) SUFFIX=dll   ;;
             *)       SUFFIX=so    ;;
           esac
-          go build -buildmode=c-shared -tags driverlib \
-            -o "pkg/quack/libadbc_driver_quack.${SUFFIX}" ./pkg/quack
+          scripts/build_lib.sh "pkg/quack/libadbc_driver_quack.${SUFFIX}"
           LIB_PATH="$PWD/pkg/quack/libadbc_driver_quack.${SUFFIX}"
           if [ "${{ runner.os }}" = "Windows" ]; then
             # Git Bash $PWD is /d/a/... — translate to D:/a/... so that
@@ -168,7 +167,7 @@ jobs:
 
       - name: Build the driver and install the suite
         run: |
-          go build -buildmode=c-shared -tags driverlib -o pkg/quack/libadbc_driver_quack.so ./pkg/quack
+          scripts/build_lib.sh pkg/quack/libadbc_driver_quack.so
           # Exported here too: $GITHUB_ENV only reaches later steps, and the
           # install below needs it.
           export ADBC_QUACK_LIBRARY="$PWD/pkg/quack/libadbc_driver_quack.so"
@@ -302,9 +301,14 @@ jobs:
           if [ "${{ matrix.goos }}" = "linux" ]; then
             export CC="zig cc -target $([ "${{ matrix.goarch }}" = arm64 ] && echo aarch64 || echo x86_64)-linux-gnu.2.17"
           fi
-          go build -buildmode=c-shared -tags driverlib \
-            -o "pkg/quack/libadbc_driver_quack.${{ matrix.ext }}" ./pkg/quack
+          scripts/build_lib.sh "pkg/quack/libadbc_driver_quack.${{ matrix.ext }}"
           echo "ADBC_QUACK_LIBRARY=$PWD/pkg/quack/libadbc_driver_quack.${{ matrix.ext }}" >> "$GITHUB_ENV"
+
+      - name: Check exported symbols (ADBC shared-library requirements)
+        shell: bash
+        # Only Adbc* (plus the deprecated QuackDriverInit alias), and the
+        # entrypoint the driver manager derives from the file name.
+        run: go run ./scripts/checkexports -allow QuackDriverInit "pkg/quack/libadbc_driver_quack.${{ matrix.ext }}"
 
       - name: Check the glibc ceiling (2.17, the manylinux2014 tag)
         if: ${{ matrix.goos == 'linux' }}
@@ -372,14 +376,20 @@ jobs:
 
       - name: Stage c-shared library + checksum for release
         shell: bash
+        # An archive per platform, holding the library under its canonical
+        # name: the driver manager derives the entrypoint from the file name
+        # (libadbc_driver_quack.so -> AdbcDriverQuackInit), so a
+        # platform-suffixed library file would not match it.
         run: |
-          mkdir -p release-artifacts
-          base="libadbc_driver_quack-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.ext }}"
-          cp "pkg/quack/libadbc_driver_quack.${{ matrix.ext }}" "release-artifacts/${base}"
+          set -euo pipefail
+          base="libadbc_driver_quack-${{ matrix.goos }}-${{ matrix.goarch }}"
+          mkdir -p "stage/${base}" release-artifacts
+          cp "pkg/quack/libadbc_driver_quack.${{ matrix.ext }}" LICENSE NOTICE "stage/${base}/"
+          tar -czf "release-artifacts/${base}.tar.gz" -C stage "${base}"
           if command -v sha256sum > /dev/null 2>&1; then
-            (cd release-artifacts && sha256sum "${base}" > "${base}.sha256")
+            (cd release-artifacts && sha256sum "${base}.tar.gz" > "${base}.tar.gz.sha256")
           else
-            (cd release-artifacts && shasum -a 256 "${base}" > "${base}.sha256")
+            (cd release-artifacts && shasum -a 256 "${base}.tar.gz" > "${base}.tar.gz.sha256")
           fi
 
       - name: Upload c-shared library artifact

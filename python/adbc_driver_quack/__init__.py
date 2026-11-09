@@ -142,7 +142,7 @@ def connect(
         ``adbc.quack.token`` for the auth token,
         ``adbc.quack.tls`` to use HTTPS.
     """
-    kwargs = {"driver": _driver_path(), "entrypoint": "QuackDriverInit", "uri": uri}
+    kwargs = {"driver": _driver_path(), "entrypoint": "AdbcDriverQuackInit", "uri": uri}
     if db_kwargs:
         # dict.update is a C-extension method whose kwargs become new
         # dict keys, not a merge target — so the merge arg stays positional.

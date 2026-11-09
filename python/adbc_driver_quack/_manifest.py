@@ -88,8 +88,8 @@ def render_manifest() -> str:
     from . import _driver_path, __version__
 
     driver_path = pathlib.Path(_driver_path()).resolve()
-    # The non-default entrypoint is load-bearing: without it the driver
-    # manager looks for AdbcDriverInit and name-based loading fails.
+    # AdbcDriverQuackInit is also what the driver manager derives from the
+    # library's file name; naming it keeps loading independent of that.
     return f"""\
 manifest_version = 1
 name = 'ADBC Quack Driver - Go'
@@ -102,7 +102,7 @@ url = 'https://github.com/gizmodata/adbc-driver-quack'
 version = '1.1.0'
 
 [Driver]
-entrypoint = 'QuackDriverInit'
+entrypoint = 'AdbcDriverQuackInit'
 
 [Driver.shared]
 {_platform_tuple()} = '{driver_path}'
