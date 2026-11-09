@@ -6,6 +6,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-11-09
+
 ### Fixed
 
 - **A second query on a connection broke a result still being read.** The Quack server keeps
