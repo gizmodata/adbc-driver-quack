@@ -6,10 +6,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-11-09
+## [1.0.1] - 2026-11-09
 
-The first stable release, for DuckDB 2.0: the driver speaks Quack protocol version 3, the
-one DuckDB 2.0's quack extension serves. **DuckDB 1.5 servers (Quack protocol 1) are no
+The first stable release, for DuckDB 2.0 (1.0.0 was tagged but never published: its release
+gate caught the cancel race fixed below).
+
+### Fixed in 1.0.1
+
+- **A statement sent right after a cancel could be interrupted.** The server-side CANCEL for
+  an abandoned statement went out asynchronously; when it reached the server after the
+  connection's next PREPARE had begun, DuckDB's per-connection interrupt stopped that next
+  statement ("INTERRUPT Error: Interrupted!"). The next statement now waits for an in-flight
+  CANCEL to finish. A live test delays the CANCEL to prove the ordering (it fails without
+  the fix).
+
+### Everything new in 1.0
+
+The driver speaks Quack protocol version 3, the one DuckDB 2.0's quack extension serves. **DuckDB 1.5 servers (Quack protocol 1) are no
 longer supported**; pin `adbc-driver-quack==0.1.0a11` for those.
 
 ### Added
@@ -100,6 +113,11 @@ longer supported**; pin `adbc-driver-quack==0.1.0a11` for those.
 - DuckDB 1.5 / Quack protocol 1 support, and APPEND_REQUEST ingest (gone from the protocol).
 - Python 3.10.
 
+
+## [1.0.0] - 2026-11-09 [YANKED]
+
+Tagged but never published: the tag's release gate failed on a cancel race. Its changes, and
+the fix, shipped as 1.0.1.
 
 ## [0.1.0-alpha.11] — 2026-08-26
 
