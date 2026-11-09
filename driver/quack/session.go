@@ -50,6 +50,12 @@ type session struct {
 	// interrupt is per connection).
 	cancelMu       sync.Mutex
 	lastCancelDone atomic.Int64 // unix nanos of the last async CANCEL's reply (tests)
+
+	// ioMu guards cursor state and orders PREPARE against FETCH. streaming
+	// is the cursor whose result is still partly on the server: the server
+	// keeps one result per connection, so a new PREPARE would discard it.
+	ioMu      sync.Mutex
+	streaming *cursor
 }
 
 // testCancelDelay delays the asynchronous CANCEL (tests only), to widen the
@@ -273,7 +279,32 @@ func (s *session) cancelQuery(ctx context.Context, u codec.HugeIntParts) error {
 
 // prepare sends PREPARE_REQUEST for sql and opens a cursor over its result.
 // inlineRows caps the rows PREPARE may answer with (unset = server default).
+//
+// The server streams one result per connection, and a new PREPARE
+// supersedes an unfinished one ("Result has been closed" on its next
+// FETCH). So when another cursor is still streaming, prepare first reads
+// the rest of that result into memory: both results stay usable (ADBC
+// allows several open readers per connection), at the cost of buffering
+// the older one. A failure while buffering is kept on that cursor and
+// returned by its next read; the new statement still runs.
 func (s *session) prepare(ctx context.Context, sql string, inlineRows message.OptionalIndex) (*cursor, error) {
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
+	if prev := s.streaming; prev != nil {
+		s.streaming = nil
+		prev.bufferRestLocked(ctx)
+	}
+	c, err := s.prepareLocked(ctx, sql, inlineRows)
+	if err != nil {
+		return nil, err
+	}
+	if c.needsMore {
+		s.streaming = c
+	}
+	return c, nil
+}
+
+func (s *session) prepareLocked(ctx context.Context, sql string, inlineRows message.OptionalIndex) (*cursor, error) {
 	uuid := newQueryUUID()
 	s.setActive(uuid)
 	req := message.PrepareRequest{
@@ -329,6 +360,9 @@ type cursor struct {
 	// counting after the batches PREPARE delivered inline).
 	nextBatch uint64
 	closed    bool
+	// err is a failure from reading the rest of the result ahead of a newer
+	// statement (bufferRestLocked), returned once the buffered chunks run out.
+	err error
 }
 
 // columnNamesSlice / columnTypesSlice return the result schema. Callers
@@ -350,8 +384,13 @@ func (c *cursor) peekFirstChunk() *message.DataChunk {
 // when the local buffer is empty and more batches are available. Returns
 // (nil, nil) when the result set is exhausted.
 func (c *cursor) nextChunk(ctx context.Context) (*message.DataChunk, error) {
+	c.sess.ioMu.Lock()
+	defer c.sess.ioMu.Unlock()
 	if c.closed {
 		return nil, nil
+	}
+	if len(c.buffered) == 0 && c.err != nil {
+		return nil, c.err
 	}
 	for len(c.buffered) == 0 && c.needsMore {
 		if err := c.fetchMore(ctx); err != nil {
@@ -370,8 +409,13 @@ func (c *cursor) nextChunk(ctx context.Context) (*message.DataChunk, error) {
 // Used by ExecuteUpdate, metadata queries, and any other call site
 // whose result is small enough to materialize.
 func (c *cursor) drainAll(ctx context.Context) ([]message.DataChunk, error) {
+	c.sess.ioMu.Lock()
+	defer c.sess.ioMu.Unlock()
 	out := append([]message.DataChunk(nil), c.buffered...)
 	c.buffered = nil
+	if c.err != nil {
+		return nil, c.err
+	}
 	for c.needsMore {
 		if err := c.fetchMore(ctx); err != nil {
 			return nil, err
@@ -382,7 +426,21 @@ func (c *cursor) drainAll(ctx context.Context) ([]message.DataChunk, error) {
 	return out, nil
 }
 
-// fetchMore asks for batch nextBatch. A batch response carries its index
+// bufferRestLocked reads the rest of the result into memory, because a new
+// statement is about to supersede it on the server. Caller holds ioMu.
+func (c *cursor) bufferRestLocked(ctx context.Context) {
+	if c.closed {
+		return
+	}
+	for c.needsMore {
+		if err := c.fetchMore(ctx); err != nil {
+			c.err = fmt.Errorf("reading the rest of the result before a new statement on this connection: %w", err)
+			return
+		}
+	}
+}
+
+// fetchMore asks for batch nextBatch. Caller holds ioMu. A batch response carries its index
 // and chunks; the terminal response carries no chunks and, when the
 // server knows it, the total batch count, which must match what arrived
 // (a short stream is an error, never a silently truncated result).
@@ -425,11 +483,16 @@ func (c *cursor) fetchMore(ctx context.Context) error {
 }
 
 func (c *cursor) close() {
+	c.sess.ioMu.Lock()
+	defer c.sess.ioMu.Unlock()
 	if c.closed {
 		return
 	}
 	c.closed = true
 	c.buffered = nil
+	if c.sess.streaming == c {
+		c.sess.streaming = nil
+	}
 	if c.needsMore {
 		// The server releases an abandoned result when the next query
 		// supersedes it, or on disconnect. Nothing to send here.

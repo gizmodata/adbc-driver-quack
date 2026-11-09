@@ -340,6 +340,7 @@ it:
 | **Sign-in** | the token | passwords, scoped tokens, **SSO (OIDC / JWKS)**, **mTLS** client certificates |
 | **Wire format** | DuckDB's internal vector serialization, tied to DuckDB versions (1.5 → 2.0 changed it) | **Apache Arrow IPC**, an open standard any Arrow library reads, optionally LZ4/zstd compressed |
 | **Large results** | batched fetch | streamed, **resumable** results, described as partitions for scale-out |
+| **Open results per connection** | one: a new query discards an unfinished result (this driver reads the rest of it into memory first, so both readers keep working) | **several**: each statement has its own id and result, and a kept result can be re-read from any batch, even after a dropped connection |
 | **Bulk ingest** | client-built DataChunks | Arrow streamed straight into a table, over several connections, committed as one |
 | **Audit and operations** | request log | **tamper-evident audit log**, instrumentation (DuckDB or PostgreSQL), Prometheus `/metrics`, query profiles, `KILL SESSION` |
 | **Clients** | DuckDB, this driver, quack-jdbc | ADBC (Python, Go, C), JDBC, ODBC, JavaScript, MCP, a built-in web UI, desktop and iOS apps |

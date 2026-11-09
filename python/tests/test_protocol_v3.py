@@ -223,3 +223,25 @@ def test_plain_http_to_a_tls_server_fails(quack_tls_server):
     # 127.0.0.1 defaults to plain HTTP, which a TLS listener refuses.
     with pytest.raises(adbc_driver_manager.Error):
         quack.connect(uri=quack_tls_server.uri, db_kwargs=quack_tls_server.db_kwargs)
+
+
+# --- several open results on one connection ----------------------------------
+
+
+def test_two_cursors_on_one_connection_both_read_in_full(quack_server):
+    # The Quack server keeps one result per connection; the driver reads the
+    # rest of an open result into memory before the next statement, so a
+    # cursor still being read survives another cursor's query.
+    n = 3_000_000
+    with _connect(quack_server) as conn, conn.cursor() as first, conn.cursor() as second:
+        first.execute(f"SELECT i, repeat('x', 64) || i AS label FROM range({n}) t(i)")
+        reader = first.fetch_record_batch()
+        head = reader.read_next_batch()
+
+        second.execute("SELECT 42 AS answer")
+        assert second.fetchone() == (42,)
+
+        rest = reader.read_all()
+        ids = pa.concat_arrays([head.column(0), *rest.column(0).chunks])
+    assert len(ids) == n
+    assert pa.compute.sum(ids).as_py() == n * (n - 1) // 2

@@ -6,6 +6,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A second query on a connection broke a result still being read.** The Quack server keeps
+  one result per connection, and a new query discards an unfinished one, so reading the first
+  result after another cursor (or a metadata call such as `GetObjects`) ran on the same
+  connection failed with `Invalid Input Error: Result has been closed`. The driver now reads
+  the rest of the open result into memory before sending the next statement, as quack-jdbc
+  does, so both readers keep working; the cost is the memory for the rest of the older
+  result. If that read fails, the older reader reports the error instead of ending early.
+
 ## [1.0.1] - 2026-11-09
 
 The first stable release, for DuckDB 2.0 (1.0.0 was tagged but never published: its release
