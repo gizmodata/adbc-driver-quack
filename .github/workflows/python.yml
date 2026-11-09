@@ -169,7 +169,10 @@ jobs:
       - name: Build the driver and install the suite
         run: |
           go build -buildmode=c-shared -tags driverlib -o pkg/quack/libadbc_driver_quack.so ./pkg/quack
-          echo "ADBC_QUACK_LIBRARY=$PWD/pkg/quack/libadbc_driver_quack.so" >> "$GITHUB_ENV"
+          # Exported here too: $GITHUB_ENV only reaches later steps, and the
+          # install below needs it.
+          export ADBC_QUACK_LIBRARY="$PWD/pkg/quack/libadbc_driver_quack.so"
+          echo "ADBC_QUACK_LIBRARY=$ADBC_QUACK_LIBRARY" >> "$GITHUB_ENV"
           python -m pip install --upgrade pip
           python -m pip install -e . "duckdb>=2.0.0" \
             "adbc-drivers-validation @ git+https://github.com/adbc-drivers/validation@f0631651f79bd01b67c5776be6fe3b7fbfbe083b"
