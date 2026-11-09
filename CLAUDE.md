@@ -30,6 +30,10 @@ The protocol is defined by duckdb/duckdb-quack at the commit DuckDB pins in
 - DuckDB's `Vector::Serialize` / `DataChunk::Serialize` with storage version V2_0_0
   (VARCHAR as lengths + bytes blobs, fields 107-109; GEOMETRY format field 99)
 
+The server keeps **one result per connection**: a new PREPARE discards an unfinished result
+("Result has been closed" on its next FETCH). `session.prepare` therefore reads the rest of the
+open cursor (`session.streaming`) into memory first; cursor state is guarded by `session.ioMu`.
+
 When a DuckDB release ships, diff `quack_message.json` and the server handlers between
 the pinned commits, and run the full suites against the new `duckdb` package.
 
