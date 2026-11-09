@@ -43,7 +43,18 @@ type session struct {
 	// Cancel. Zero when none.
 	activeMu    sync.Mutex
 	activeQuery codec.HugeIntParts
+
+	// cancelMu is held while a server-side CANCEL is in flight. The next
+	// statement waits for it: a CANCEL that reaches the server after the
+	// next PREPARE has begun interrupts that statement instead (DuckDB's
+	// interrupt is per connection).
+	cancelMu       sync.Mutex
+	lastCancelDone atomic.Int64 // unix nanos of the last async CANCEL's reply (tests)
 }
+
+// testCancelDelay delays the asynchronous CANCEL (tests only), to widen the
+// window in which a following statement could overtake it.
+var testCancelDelay time.Duration
 
 func newSession(ctx context.Context, uri transport.QuackURI) (*session, error) {
 	s := &session{
@@ -164,6 +175,13 @@ func (s *session) send(ctx context.Context, m message.QuackMessage) (message.Qua
 	if dead := s.dead.Load(); dead != nil {
 		return nil, *dead
 	}
+	switch m.(type) {
+	case message.CancelRequest, message.HeartbeatRequest:
+	default:
+		// Wait for a CANCEL still in flight (see cancelMu).
+		s.cancelMu.Lock()
+		s.cancelMu.Unlock() //nolint:staticcheck // a barrier, not a critical section
+	}
 	resp, err := s.transport.Send(ctx, m)
 	var se *transport.ErrServerError
 	if errors.As(err, &se) && se.MustInvalidate {
@@ -186,10 +204,18 @@ func (s *session) send(ctx context.Context, m message.QuackMessage) (message.Qua
 			s.activeMu.Unlock()
 		}
 		if query != (codec.HugeIntParts{}) {
+			// Taken here, before the goroutine starts, so a statement the
+			// caller sends right after this returns cannot overtake it.
+			s.cancelMu.Lock()
 			go func() {
+				defer s.cancelMu.Unlock()
+				if testCancelDelay > 0 {
+					time.Sleep(testCancelDelay)
+				}
 				cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 				_, _ = s.transport.Send(cctx, message.CancelRequest{Hdr: s.header(message.MessageTypeCancelRequest), QueryUUID: query})
+				s.lastCancelDone.Store(time.Now().UnixNano())
 			}()
 		}
 		err = fmt.Errorf("%w (%v)", ctx.Err(), err)

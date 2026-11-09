@@ -107,3 +107,39 @@ func TestLargeResultStreamsInBatches(t *testing.T) {
 		t.Fatalf("expected several FETCH batches, got %d", cur.nextBatch-1)
 	}
 }
+
+// TestStatementAfterCancelWaitsForTheCancel: the server-side CANCEL sent for
+// an abandoned statement must reach the server before the caller's next
+// statement does; a late CANCEL would interrupt that next statement (the CI
+// failure behind 1.0.0's first tag run). The hook delays the CANCEL by a
+// second, so without the ordering the follow-up query would be sent first.
+func TestStatementAfterCancelWaitsForTheCancel(t *testing.T) {
+	u := liveURI(t, nil)
+	ctx := context.Background()
+	s, err := newSession(ctx, u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close(ctx)
+	testCancelDelay = time.Second
+	defer func() { testCancelDelay = 0 }()
+
+	qctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	_, err = s.drainPrepared(qctx, "SELECT count(*) FROM range(100000000000) a")
+	cancel()
+	if err == nil {
+		t.Fatal("the long query should have been cancelled")
+	}
+	result, err := s.drainPrepared(ctx, "SELECT 42")
+	sent := time.Now().UnixNano()
+	if err != nil {
+		t.Fatalf("follow-up query: %v", err)
+	}
+	if v := result.Chunks[0].Columns[0].GetObject(0); v != int32(42) {
+		t.Fatalf("follow-up query returned %v", v)
+	}
+	done := s.lastCancelDone.Load()
+	if done == 0 || done > sent {
+		t.Fatalf("the follow-up statement finished before the CANCEL was answered (cancel done %d, query done %d)", done, sent)
+	}
+}
