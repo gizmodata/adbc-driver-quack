@@ -4,11 +4,10 @@ on:
   push:
     branches: [main]
     tags: ['v*']
-    # Documentation-only pushes don't rebuild (path filters never apply to tags).
-    paths-ignore: ['**/*.md', 'docs/**', 'LICENSE', 'NOTICE', '.idea/**']
+  # No paths-ignore: a documentation-only PR still needs a run, or the required "CI result" check
+  # never reports. The changes job below skips the heavy jobs for it instead.
   pull_request:
     branches: [main]
-    paths-ignore: ['**/*.md', 'docs/**', 'LICENSE', 'NOTICE', '.idea/**']
   workflow_dispatch:
 
 # A newer run on the same branch cancels the older one; a tag run never is.
@@ -16,7 +15,8 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
-# One workflow, one DAG:
+# One workflow, one DAG (every job needs `changes`, which skips them all for a
+# documentation-only change; `CI result` needs every job and is the required check):
 #
 #   go-test ────┐
 #   test ───────┼─> wheels ─> old-glibc ─┬─> publish (PyPI)
@@ -35,8 +35,77 @@ env:
   GO_VERSION: '1.27.3'
 
 jobs:
+  # Decides whether this run is about code (code=true) or documentation only (code=false). Every
+  # other job needs it and runs only when code=true; "CI result" at the end is the one required
+  # check. code=false only when every changed file is *.md, docs/**, LICENSE, NOTICE or
+  # .github/ISSUE_TEMPLATE/** (workflow files are code). Tags, workflow_dispatch, schedule and any
+  # other event (including release.yml calling this workflow, which carries the caller's tag push
+  # or dispatch) always test everything.
+  changes:
+    name: Changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Code or documentation only?
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          code=true
+          range=
+          case "$EVENT:$REF" in
+            *:refs/tags/*) reason="a tag ($REF)" ;;
+            pull_request:*) range="$PR_BASE...$SHA" ;;
+            push:refs/heads/*)
+              if [ -z "$BEFORE" ] || [ -z "${BEFORE//0/}" ]; then
+                reason="a new branch"
+              elif ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+                reason="the previous head $BEFORE is not in the history (force push)"
+              else
+                range="$BEFORE..$SHA"
+              fi
+              ;;
+            *) reason="a $EVENT run on $REF" ;;
+          esac
+          if [ -n "$range" ]; then
+            # --no-renames: a rename lists both paths, so moving code into docs/ is still code.
+            files=$(git diff --no-renames --name-only "$range")
+            count=0
+            code=false
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              count=$((count + 1))
+              case "$f" in
+                *.md | docs/* | LICENSE | NOTICE | .github/ISSUE_TEMPLATE/*) echo "docs: $f" ;;
+                *) echo "code: $f"; code=true ;;
+              esac
+            done <<< "$files"
+            if [ "$count" -eq 0 ]; then
+              code=true
+              reason="no changed files in $range"
+            elif [ "$code" = true ]; then
+              reason="code changed in $range"
+            else
+              reason="only documentation changed in $range ($count files)"
+            fi
+          fi
+          echo "code=$code ($reason)"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "**Changes:** code=\`$code\` ($reason)" >> "$GITHUB_STEP_SUMMARY"
+
   go-test:
     name: Go tests (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -73,6 +142,8 @@ jobs:
 
   test:
     name: Python ${{ matrix.python }} (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -152,6 +223,8 @@ jobs:
 
   conformance:
     name: ADBC conformance suite (adbc-drivers.org)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -202,7 +275,8 @@ jobs:
     # bugs (wrong binary bundled, missing dependency, wrong platform tag)
     # trip CI before publish, not after a PyPI release.
     name: Wheel ${{ matrix.os }} ${{ matrix.arch }}
-    needs: [go-test, test, conformance]
+    needs: [changes, go-test, test, conformance]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -413,7 +487,8 @@ jobs:
     # family). Loading the library is the portability check (dlopen fails on
     # a missing GLIBC_x.y symbol version); a refused connection proves it loaded.
     name: Wheel on AlmaLinux 8 (${{ matrix.arch }})
-    needs: wheels
+    needs: [changes, wheels]
+    if: needs.changes.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -426,7 +501,16 @@ jobs:
     container: almalinux:8
     steps:
       - name: Install Python 3.12
-        run: dnf install -y -q python3.12 python3.12-pip
+        # A mirror can serve a broken repomd.xml ("repomd.xml parser error"), and dnf's own
+        # retries (--setopt=retries) cover failed downloads, not a bad file: it fetches it once
+        # and gives up. So retry the whole install with fresh metadata.
+        run: |
+          for i in 1 2 3 4 5; do
+            if dnf install -y -q python3.12 python3.12-pip; then break; fi
+            if [ "$i" -eq 5 ]; then echo "::error::dnf install failed 5 times"; exit 1; fi
+            dnf clean metadata || true
+            sleep $((i * 15))
+          done
 
       - uses: actions/download-artifact@v8
         with:
@@ -453,8 +537,8 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    needs: [wheels, old-glibc]
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [changes, wheels, old-glibc]
+    if: startsWith(github.ref, 'refs/tags/v') && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -481,8 +565,8 @@ jobs:
 
   github-release:
     name: Attach c-shared libraries to GitHub Release
-    needs: [wheels, old-glibc]
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [changes, wheels, old-glibc]
+    if: startsWith(github.ref, 'refs/tags/v') && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -529,8 +613,8 @@ jobs:
 
   pkgsite-warm:
     name: Warm pkg.go.dev cache
-    needs: [publish, github-release]
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [changes, publish, github-release]
+    if: startsWith(github.ref, 'refs/tags/v') && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Trigger pkg.go.dev fetch
@@ -543,3 +627,43 @@ jobs:
             "https://pkg.go.dev/fetch/github.com/gizmodata/adbc-driver-quack@${ref}" \
             -o /dev/null -w "pkg.go.dev fetch (${ref}): HTTP %{http_code} in %{time_total}s\n" \
             || true
+
+  # The one required status check. It fails when any job failed or was cancelled, and when the
+  # change is code but a job that must run was skipped; for a documentation-only change the
+  # skipped jobs pass. Jobs in OPTIONAL skip by their own conditions (tag-only publishing).
+  ci-result:
+    name: CI result
+    if: always()
+    needs: [changes, go-test, test, conformance, wheels, old-glibc, publish, github-release, pkgsite-warm]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job passed, or was skipped for a documentation-only change
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          CODE: ${{ needs.changes.outputs.code }}
+          OPTIONAL: "publish github-release pkgsite-warm"
+        run: |
+          set -euo pipefail
+          changes=$(jq -r '.changes.result' <<< "$NEEDS")
+          if [ "$changes" != success ] || { [ "$CODE" != true ] && [ "$CODE" != false ]; }; then
+            echo "::error::the Changes job didn't decide (result: $changes, code: '$CODE')"
+            exit 1
+          fi
+          failed=0
+          while read -r job result; do
+            optional=false
+            for o in $OPTIONAL; do if [ "$o" = "$job" ]; then optional=true; fi; done
+            case "$result" in
+              success) echo "ok       $job" ;;
+              skipped)
+                if [ "$CODE" = true ] && [ "$optional" = false ]; then
+                  echo "::error::$job was skipped, but this change is code: it must run"
+                  failed=1
+                else
+                  echo "skipped  $job"
+                fi
+                ;;
+              *) echo "::error::$job: $result"; failed=1 ;;
+            esac
+          done < <(jq -r 'to_entries[] | "\(.key) \(.value.result)"' <<< "$NEEDS")
+          exit "$failed"
