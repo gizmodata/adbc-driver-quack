@@ -6,11 +6,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-11-09
+
 ### Changed
 
 - `LICENSE` holds only the MIT License text, so GitHub (and the license badge) recognize it as MIT; the attributions that followed it are in `NOTICE`.
 - CI: the windows/arm64 build downloads a pinned, checksummed llvm-mingw (20261104) instead
   of asking the GitHub API for the latest release, which can be rate-limited and fail a release.
+
+Released so PyPI's copy of the package carries the plain MIT `LICENSE`. No code changes.
 
 ## [1.0.3] - 2026-11-09
 
