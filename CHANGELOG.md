@@ -8,6 +8,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `LICENSE` holds only the MIT License text, so GitHub (and the license badge) recognize it as MIT; the attributions that followed it are in `NOTICE`.
 - CI: the windows/arm64 build downloads a pinned, checksummed llvm-mingw (20261104) instead
   of asking the GitHub API for the latest release, which can be rate-limited and fail a release.
 
