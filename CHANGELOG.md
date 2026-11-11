@@ -6,6 +6,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A malformed or truncated response can no longer panic the driver, or make it reserve memory, through a count it
+  claims.** Vector row counts, dictionary sizes and selections, LIST entries, ARRAY sizes, list lengths and string
+  lengths are checked against the bytes the message holds before anything is allocated or indexed, and a bad one is
+  returned as an error. A response of a few dozen bytes could previously panic (`makeslice: len out of range`,
+  an index out of range, or a nil vector). A vector may claim more than 1,048,576 rows only when the message carries
+  at least one byte per row, as the FLAT child of a long list does; DuckDB sends CONSTANT and SEQUENCE vectors with
+  at most 2,048. Ported from quack-jdbc 1.0.1.
+
 ### Changed
 
 - **CI**: a change that touches only documentation (`*.md`, `docs/`, `LICENSE`, `NOTICE`) now gets a run that skips the build and test jobs (it used to get no run, so its required checks never reported), and one job, `CI result`, reports on every run and is the only required check. The glibc-2.28 install check retries `dnf install` with fresh metadata, so a mirror serving a broken `repomd.xml` can't fail a build.

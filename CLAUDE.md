@@ -42,6 +42,10 @@ the pinned commits, and run the full suites against the new `duckdb` package.
 - **Go floor** per `go.mod` (1.26); CI builds with Go 1.27, whose oldest supported macOS
   is 13.0, so the macOS wheel is tagged 13.0.
 - **No `panic` across the cgo boundary**; the generated wrapper recovers.
+- Every count the decoder reads comes from the peer. One that sizes an allocation or an index
+  must first be checked against the bytes the message holds (`checkRowCount` in
+  `internal/message/vector_codec.go`, `BinaryReader.ensure`), and a decode step returns as soon
+  as the reader has failed; each gets a rejected case in `vector_bounds_test.go`.
 - `pkg/quack/driver.go`, `utils.c`, `utils.h` are generated from arrow-adbc's
   `go/adbc/pkg/_tmpl` (`go run ./gen -prefix Quack ...` in that module), with two local
   edits: include paths and `exportRecordBatch` in `QuackArrayStreamGetNext`

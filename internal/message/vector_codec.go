@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"time"
 
@@ -57,6 +58,29 @@ func readSplitStrings(r *codec.BinaryReader, count int) [][]byte {
 	return out
 }
 
+// maxUnbackedVectorRows is the most rows a vector may claim when the
+// message does not hold at least one byte per row. Row counts come from the
+// peer, and CONSTANT and SEQUENCE vectors expand to count rows from a few
+// bytes, so an unchecked count sizes an allocation of the peer's choosing.
+// DuckDB sends such vectors with at most its vector size (2048) rows; only
+// FLAT children of nested types grow larger, and those carry their rows on
+// the wire.
+const maxUnbackedVectorRows = 1 << 20
+
+// checkRowCount fails the reader, and reports false, when count is more
+// rows than the rest of the message can back.
+func checkRowCount(r *codec.BinaryReader, count int, what string) bool {
+	if r.Err() != nil {
+		return false
+	}
+	if count > maxUnbackedVectorRows && count > r.Remaining() {
+		r.Fail(fmt.Errorf("message: %s claims %d rows, but only %d byte(s) of the message remain",
+			what, count, r.Remaining()))
+		return false
+	}
+	return true
+}
+
 // ErrUnsupportedVector signals an encoding we don't (yet) handle.
 var ErrUnsupportedVector = errors.New("message: unsupported vector encoding")
 
@@ -73,6 +97,9 @@ func DecodeDataChunkWrapper(r *codec.BinaryReader) DataChunk {
 func DecodeDataChunk(r *codec.BinaryReader) DataChunk {
 	v, _ := codec.ReadObject(r, func(rr *codec.BinaryReader) DataChunk {
 		rowCount := codec.ReadRequiredField(rr, 100, func(rrr *codec.BinaryReader) int { return rrr.ReadULEB128Int() })
+		if !checkRowCount(rr, rowCount, "DataChunk") {
+			return DataChunk{}
+		}
 		types := codec.ReadRequiredField(rr, 101, func(rrr *codec.BinaryReader) []quacktype.LogicalType {
 			return codec.ReadList(rrr, func(_ int, rrrr *codec.BinaryReader) quacktype.LogicalType {
 				return quacktype.DecodeLogicalType(rrrr)
@@ -104,6 +131,9 @@ func DecodeVector(r *codec.BinaryReader, t quacktype.LogicalType, count int) Dec
 }
 
 func decodeVectorBody(r *codec.BinaryReader, t quacktype.LogicalType, count int) DecodedVector {
+	if !checkRowCount(r, count, "vector") {
+		return nil
+	}
 	vectorType := VectorType(codec.ReadOptionalField(r, 90, func(rr *codec.BinaryReader) int { return rr.ReadULEB128Int() }, int(VectorTypeFlat)))
 	switch vectorType {
 	case VectorTypeFlat:
@@ -114,6 +144,9 @@ func decodeVectorBody(r *codec.BinaryReader, t quacktype.LogicalType, count int)
 	case VectorTypeConstant:
 		// nested decode of single value, then broadcast
 		single := decodeVectorBody(r, t, minOne(count))
+		if r.Err() != nil {
+			return nil
+		}
 		var value interface{}
 		if single != nil && single.Size() > 0 {
 			value = single.GetObject(0)
@@ -125,10 +158,22 @@ func decodeVectorBody(r *codec.BinaryReader, t quacktype.LogicalType, count int)
 		})
 		dictCount := codec.ReadRequiredField(r, 92, func(rr *codec.BinaryReader) int { return rr.ReadULEB128Int() })
 		dict := decodeVectorBody(r, t, dictCount)
+		if r.Err() != nil || dict == nil {
+			return nil
+		}
+		for _, idx := range selection {
+			if idx < 0 || int(idx) >= dict.Size() {
+				r.Fail(fmt.Errorf("message: dictionary selection %d is out of range (dictionary has %d)", idx, dict.Size()))
+				return nil
+			}
+		}
 		return projectVector(t, dict, selection)
 	case VectorTypeSequence:
 		start := codec.ReadRequiredField(r, 91, func(rr *codec.BinaryReader) int64 { return rr.ReadSLEB128() })
 		incr := codec.ReadRequiredField(r, 92, func(rr *codec.BinaryReader) int64 { return rr.ReadSLEB128() })
+		if r.Err() != nil {
+			return nil
+		}
 		return sequenceVector(t, count, start, incr)
 	case VectorTypeShredded:
 		// A VARIANT read from shredded storage (DuckDB 2.0). Unshredding
@@ -150,6 +195,10 @@ func decodeFlatVector(r *codec.BinaryReader, t quacktype.LogicalType, count int)
 		validity = codec.ReadRequiredField(r, 101, func(rr *codec.BinaryReader) []uint64 {
 			return readValidityMask(rr, count)
 		})
+	}
+
+	if r.Err() != nil {
+		return nil
 	}
 
 	physical := quacktype.GetPhysicalType(t)
@@ -194,6 +243,9 @@ func decodeFlatVector(r *codec.BinaryReader, t quacktype.LogicalType, count int)
 				return DecodeVector(rrr, children[i].Type, count)
 			})
 		})
+		if r.Err() != nil {
+			return nil
+		}
 		values := make([]interface{}, count)
 		for row := 0; row < count; row++ {
 			if !ValidityIsValid(validity, row) {
@@ -217,10 +269,18 @@ func decodeFlatVector(r *codec.BinaryReader, t quacktype.LogicalType, count int)
 		childVec := codec.ReadRequiredField(r, 106, func(rr *codec.BinaryReader) DecodedVector {
 			return DecodeVector(rr, childType, listSize)
 		})
+		if r.Err() != nil || childVec == nil {
+			return nil
+		}
 		values := make([]interface{}, count)
 		for row, e := range entries {
 			if !ValidityIsValid(validity, row) {
 				continue
+			}
+			if e.offset > childVec.Size() || e.length > childVec.Size()-e.offset {
+				r.Fail(fmt.Errorf("message: LIST row %d spans %d child elements from %d, but the child vector has %d",
+					row, e.length, e.offset, childVec.Size()))
+				return nil
 			}
 			slice := make([]interface{}, e.length)
 			for k := 0; k < e.length; k++ {
@@ -236,10 +296,18 @@ func decodeFlatVector(r *codec.BinaryReader, t quacktype.LogicalType, count int)
 			r.Fail(fmt.Errorf("message: ARRAY vector size %d, type says %d", arrSize, expected))
 			return nil
 		}
+		if arrSize > 0 && count > math.MaxInt/arrSize {
+			r.Fail(fmt.Errorf("message: ARRAY vector of %d rows of size %d has more child elements than a vector can hold",
+				count, arrSize))
+			return nil
+		}
 		childType, _ := quacktype.GetChildType(t)
 		childVec := codec.ReadRequiredField(r, 104, func(rr *codec.BinaryReader) DecodedVector {
 			return DecodeVector(rr, childType, arrSize*count)
 		})
+		if r.Err() != nil || childVec == nil {
+			return nil
+		}
 		values := make([]interface{}, count)
 		for row := 0; row < count; row++ {
 			if !ValidityIsValid(validity, row) {
