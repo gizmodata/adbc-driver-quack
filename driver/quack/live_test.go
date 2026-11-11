@@ -108,6 +108,38 @@ func TestLargeResultStreamsInBatches(t *testing.T) {
 	}
 }
 
+// TestListLongerThanTheUnbackedRowCapDecodes: the decoder refuses a vector of
+// more than 2^20 rows unless the message holds its rows. A long list's child
+// is such a vector; the real server sends it FLAT, so it must keep decoding.
+func TestListLongerThanTheUnbackedRowCapDecodes(t *testing.T) {
+	u := liveURI(t, nil)
+	ctx := context.Background()
+	s, err := newSession(ctx, u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close(ctx)
+	cur, err := s.cursor(ctx, "SELECT range(2000000) AS a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cur.close()
+	ch, err := cur.nextChunk(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch == nil || ch.RowCount != 1 {
+		t.Fatalf("want one row, got %+v", ch)
+	}
+	list, ok := ch.Columns[0].GetObject(0).([]interface{})
+	if !ok || len(list) != 2000000 {
+		t.Fatalf("want a 2000000-element list, got %T of %d", ch.Columns[0].GetObject(0), len(list))
+	}
+	if list[0] != int64(0) || list[1999999] != int64(1999999) {
+		t.Fatalf("first %v, last %v", list[0], list[1999999])
+	}
+}
+
 // TestStatementAfterCancelWaitsForTheCancel: the server-side CANCEL sent for
 // an abandoned statement must reach the server before the caller's next
 // statement does; a late CANCEL would interrupt that next statement (the CI

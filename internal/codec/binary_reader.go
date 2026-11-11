@@ -64,7 +64,8 @@ func (r *BinaryReader) ensure(n int) bool {
 	if r.err != nil {
 		return false
 	}
-	if r.offset+n > len(r.bytes) {
+	// Compared this way round so a huge peer-supplied length cannot overflow.
+	if n > len(r.bytes)-r.offset {
 		r.err = newError("ensure",
 			fmt.Sprintf("unexpected end of input; needed %d byte(s), have %d", n, r.Remaining()),
 			r.offset)
@@ -295,7 +296,9 @@ func ReadList[T any](r *BinaryReader, read func(index int, r *BinaryReader) T) [
 	if r.err != nil {
 		return nil
 	}
-	out := make([]T, 0, length)
+	// The length comes from the peer: cap the reservation, a false length
+	// fails on the read.
+	out := make([]T, 0, min(length, 1024))
 	for i := 0; i < length; i++ {
 		v := read(i, r)
 		if r.err != nil {
