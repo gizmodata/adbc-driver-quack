@@ -18,6 +18,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **README**: installing without Python is one line, `curl https://install.adbc.gizmodata.com/quack | sh` (Linux, macOS) or `irm https://install.adbc.gizmodata.com/quack.ps1 | iex` (Windows): it installs the release's shared library, checked against its `SHA256SUMS`, and a `quack` driver manifest, so any ADBC driver manager loads it as `driver = "quack"` ([gizmodata/adbc-install](https://github.com/gizmodata/adbc-install)).
 - **CI**: a change that touches only documentation (`*.md`, `docs/`, `LICENSE`, `NOTICE`) now gets a run that skips the build and test jobs (it used to get no run, so its required checks never reported), and one job, `CI result`, reports on every run and is the only required check. The glibc-2.28 install check retries `dnf install` with fresh metadata, so a mirror serving a broken `repomd.xml` can't fail a build.
 
 ## [1.0.4] - 2026-11-09

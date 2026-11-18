@@ -61,6 +61,25 @@ pip install adbc-driver-quack
 go get github.com/gizmodata/adbc-driver-quack@latest
 ```
 
+**Any language, through an ADBC driver manager (`driver = "quack"`):** one line installs the
+shared library and its driver manifest, so the driver manager loads the driver by name:
+no Python, and no DuckDB library on the client.
+
+```bash
+curl https://install.adbc.gizmodata.com/quack | sh                 # Linux, macOS
+```
+
+```powershell
+irm https://install.adbc.gizmodata.com/quack.ps1 | iex             # Windows
+```
+
+The installer checks the download against the release's `SHA256SUMS`. To pin a version
+(`curl https://install.adbc.gizmodata.com/quack | ADBC_VERSION=<version> sh`), install
+system-wide or into another directory, or uninstall, see
+[gizmodata/adbc-install](https://github.com/gizmodata/adbc-install). If another vendor's
+`quack` driver manifest is installed, the installer backs it up, replaces it and prints the
+command that restores it; `ADBC_NAME=<other name>` installs side by side instead.
+
 ### 3. Connect and query
 
 ```python
@@ -389,7 +408,8 @@ cancellation. Server errors carry DuckDB's exception type as an ADBC status and 
 [ADBC connection profiles](https://arrow.apache.org/adbc/current/format/connection_profiles.html)
 keep a connection's driver and options in a TOML file. They resolve the driver by name,
 through a [driver manifest](https://arrow.apache.org/adbc/current/format/driver_manifests.html).
-Install ours once per environment:
+The [one-line installer](#2-install-the-driver)
+writes it; from Python, install ours once per environment:
 
 ```console
 $ python -m adbc_driver_quack install-manifest
