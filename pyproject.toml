@@ -4,7 +4,7 @@ description = "An Apache Arrow ADBC driver for DuckDB's Quack remote protocol (D
 authors = [{ name = "GizmoData", email = "support@gizmodata.com" }]
 license = "MIT"
 license-files = ["LICENSE", "NOTICE"]
-readme = "README.md"
+readme = "python/README.md"
 requires-python = ">=3.11"
 dynamic = ["version"]
 keywords = [

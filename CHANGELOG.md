@@ -18,6 +18,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **PyPI page**: the package's description on PyPI is now its own Python-only page, `python/README.md` (install, requirements, connect and query, streaming, loading the driver by name), linking to the repository README for other languages, the one-line installer and the full reference; the repository README keeps everything. `python/tests/test_pypi_readme.py` runs every Python example on that page against the live database.
+- **README**: installing without Python is one line, `curl https://install.adbc.gizmodata.com/quack | sh` (Linux, macOS) or `irm https://install.adbc.gizmodata.com/quack.ps1 | iex` (Windows): it installs the release's shared library, checked against its `SHA256SUMS`, and a `quack` driver manifest, so any ADBC driver manager loads it as `driver = "quack"` ([gizmodata/adbc-install](https://github.com/gizmodata/adbc-install)).
 - **CI**: a change that touches only documentation (`*.md`, `docs/`, `LICENSE`, `NOTICE`) now gets a run that skips the build and test jobs (it used to get no run, so its required checks never reported), and one job, `CI result`, reports on every run and is the only required check. The glibc-2.28 install check retries `dnf install` with fresh metadata, so a mirror serving a broken `repomd.xml` can't fail a build.
 
 ## [1.0.4] - 2026-11-09
