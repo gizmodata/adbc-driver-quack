@@ -403,7 +403,10 @@ defines), and errors read `[quack] message`. Before 1.1 the options were named `
 Those names still work, for setting and for `GetOption`, but the first use of each in a
 process prints one line to stderr, naming the key only (never its value):
 `[quack] option "adbc.quack.token" is deprecated; use "quack.auth.token"`. When both names
-are given, the new one wins.
+are given, the new one wins, unless its value is empty and the old one's is not. Header names
+compare case-insensitively; two keys naming the same header under one prefix are refused. A
+key under `quack.` or `adbc.quack.` that isn't an option is refused (so is a boolean other than
+`true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`).
 
 | Deprecated (before 1.1) | Use |
 |---|---|

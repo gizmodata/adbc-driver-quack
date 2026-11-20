@@ -95,10 +95,14 @@ func knownDatabaseOption(key string) bool {
 	if transport.KnownOption(key) {
 		return true
 	}
-	// Before 1.1 every `adbc.quack.*` key was accepted; the old spellings
-	// of current options are deprecated aliases, and other `adbc.quack.*`
-	// keys are still accepted (and ignored) as they were.
-	return strings.HasPrefix(key, transport.DeprecatedOptionPrefix) || strings.HasPrefix(key, "adbc.telemetry.")
+	// The pre-1.1 `adbc.quack.*` spellings of current options are deprecated
+	// aliases; any other `adbc.quack.*` key is refused like an unknown
+	// `quack.*` key (before 1.1 it was accepted and ignored, so a
+	// half-migrated key such as `adbc.quack.tls.enabled` did nothing).
+	if _, deprecated := transport.CanonicalOption(key); deprecated {
+		return true
+	}
+	return strings.HasPrefix(key, "adbc.telemetry.")
 }
 
 type databaseImpl struct {
@@ -127,11 +131,22 @@ func (d *databaseImpl) SetOptions(opts map[string]string) error {
 }
 
 // lookupLocked returns the value of the option key names, under its current
-// name or any deprecated spelling of it; the current name wins. d.mu is held.
+// name or a deprecated spelling of it, resolved as the connection resolves
+// it: the current name wins unless its value is empty and the deprecated
+// one's is not. d.mu is held.
 func (d *databaseImpl) lookupLocked(key string) (string, bool) {
 	canonical, _ := transport.CanonicalOption(key)
-	if v, ok := d.opts[canonical]; ok {
-		return v, true
+	cur, haveCur := d.opts[canonical]
+	if haveCur && cur != "" {
+		return cur, true
+	}
+	for k, v := range d.opts {
+		if c, deprecated := transport.CanonicalOption(k); deprecated && c == canonical && v != "" {
+			return v, true
+		}
+	}
+	if haveCur {
+		return cur, true
 	}
 	for k, v := range d.opts {
 		if c, deprecated := transport.CanonicalOption(k); deprecated && c == canonical {

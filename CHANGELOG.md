@@ -21,7 +21,13 @@ option names keep working.
   before) as URL query parameters. The first time each old name is used in a process, the driver
   prints one line to stderr naming the keys only, never the value:
   `[quack] option "adbc.quack.token" is deprecated; use "quack.auth.token"`. When an old and a
-  new name are both given, the new one wins. Go: the `Option*` constants keep their names and
+  new name are both given, the new one wins, unless its value is empty and the old one's is not:
+  an empty value never erases a non-empty one (so an empty `quack.tls.certificate_fingerprint`
+  can't drop a pin set under `adbc.quack.ssl_fingerprint`, nor an empty token erase a token).
+  Extra HTTP header names compare case-insensitively: `adbc.quack.http.header.x-proxy-auth` and
+  `quack.http.header.X-Proxy-Auth` are one header (the new spelling wins), and two keys under
+  the same prefix that name the same header (`quack.http.header.X-A` and `quack.http.header.x-a`)
+  are refused. Go: the `Option*` constants keep their names and
   now hold the new keys, and `DeprecatedOptions()` lists the old ones; Python:
   `DatabaseOptions` keeps its member names and `HTTP_HEADER_OPTION_PREFIX` is
   `quack.http.header.`.
@@ -39,8 +45,18 @@ option names keep working.
   | `adbc.quack.rpc.timeout_seconds.request` | `quack.http.request_timeout_seconds` |
   | `adbc.quack.http.header.<Name>` | `quack.http.header.<Name>` |
 
-  An unknown key under the new `quack.` prefix is refused (`NOT_IMPLEMENTED`), so a misspelled
-  option fails loudly; other `adbc.quack.*` keys are still accepted, as before.
+- **Behaviour change: unknown `quack.*` and `adbc.quack.*` keys are refused**, as options
+  (`NOT_IMPLEMENTED`, `[quack] unsupported option "<key as written>"`) and as URL query
+  parameters. Before, any `adbc.quack.*` database option was accepted and ignored, so a
+  misspelled or half-migrated key (`adbc.quack.tls.enabled=true`,
+  `adbc.quack.tls.certificate_fingerprint=...`) silently did nothing: TLS stayed off, the pin was
+  never set. No `adbc.quack.*` key was ever documented as reserved or accepted-and-ignored, so
+  none is kept; the old spellings in the table above still work.
+- **Behaviour change: boolean options refuse values they don't recognise.** `quack.tls.enabled`
+  (and `adbc.quack.tls`, and the `tls` URL parameter) accept `true`/`false`, `1`/`0`, `yes`/`no`
+  and `on`/`off` in any case; anything else is an `INVALID_ARGUMENT` error naming the key.
+  Before, any other value meant false, so `quack.tls.enabled=ture` sent plain HTTP to a remote
+  host.
 - **Error messages read `[quack] message`** (the driver's slug, as the style guide asks), from
   Go, Python and the C library alike. Before, the prefix depended on the path (`[Quack] ` from
   the C library for callers without ADBC 1.1 error details, none from Go), and two connection

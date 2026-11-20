@@ -3,7 +3,9 @@ package transport
 import (
 	"fmt"
 	"io"
+	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -123,22 +125,133 @@ func SetDeprecationOutput(w io.Writer) (restore func()) {
 	}
 }
 
+// CheckOptionKey refuses a key that looks like one of this driver's options
+// (`quack.*`, or the pre-1.1 `adbc.quack.*`) but is not one, so a
+// misspelled or half-migrated key (`adbc.quack.tls.enabled`) fails instead
+// of being ignored. The error names the key exactly as the caller wrote it.
+func CheckOptionKey(key string) error {
+	if KnownOption(key) {
+		return nil
+	}
+	if _, deprecated := CanonicalOption(key); deprecated {
+		return nil
+	}
+	if strings.HasPrefix(key, "quack.") || strings.HasPrefix(key, DeprecatedOptionPrefix) {
+		return fmt.Errorf("transport: unsupported option %q", key)
+	}
+	return nil
+}
+
+// headerOption returns the header name in key and whether key spells it
+// with the current prefix; ok is false for a key that is not a header option.
+func headerOption(key string) (name string, current bool, ok bool) {
+	switch {
+	case strings.HasPrefix(key, HTTPHeaderPrefix):
+		return strings.TrimSpace(key[len(HTTPHeaderPrefix):]), true, true
+	case strings.HasPrefix(key, DeprecatedHTTPHeaderPrefix):
+		return strings.TrimSpace(key[len(DeprecatedHTTPHeaderPrefix):]), false, true
+	}
+	return "", false, false
+}
+
+// headerOptions collects the extra HTTP headers in opts, keyed by canonical
+// header name (HTTP header names are case-insensitive). Two keys under the
+// same prefix that name the same header (differing only in case) are refused,
+// so which one is sent never depends on map order. Between the deprecated and
+// the current spelling the current one wins, unless its value is empty and the
+// deprecated one's is not. An empty value sends no header.
+func headerOptions(opts map[string]string) (map[string]string, error) {
+	type pick struct {
+		key, value string
+	}
+	current := map[string]pick{}
+	deprecated := map[string]pick{}
+	keys := make([]string, 0, len(opts))
+	for k := range opts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		name, isCurrent, ok := headerOption(k)
+		if !ok {
+			continue
+		}
+		v := opts[k]
+		if err := validateHeader(name, v); err != nil {
+			return nil, err
+		}
+		canon := http.CanonicalHeaderKey(name)
+		group := deprecated
+		if isCurrent {
+			group = current
+		} else {
+			WarnDeprecatedOption(k, HTTPHeaderPrefix+name)
+		}
+		if prev, dup := group[canon]; dup {
+			return nil, fmt.Errorf("transport: options %q and %q name the same HTTP header; set it once", prev.key, k)
+		}
+		group[canon] = pick{key: k, value: v}
+	}
+	var out map[string]string
+	set := func(canon, v string) {
+		if v == "" {
+			return
+		}
+		if out == nil {
+			out = make(map[string]string)
+		}
+		out[canon] = v
+	}
+	for canon, p := range current {
+		if p.value == "" {
+			if old, ok := deprecated[canon]; ok {
+				set(canon, old.value)
+				continue
+			}
+		}
+		set(canon, p.value)
+	}
+	for canon, old := range deprecated {
+		if _, ok := current[canon]; !ok {
+			set(canon, old.value)
+		}
+	}
+	return out, nil
+}
+
 // canonicalOptions rewrites deprecated keys in opts to their current names,
-// warning once per old key. When both spellings are present the current
-// name wins.
-func canonicalOptions(opts map[string]string) map[string]string {
-	out := make(map[string]string, len(opts))
+// warning once per old key, and returns, for each current name it set, the
+// key as the caller spelled it (for error messages). When both spellings are
+// given the current name wins, unless its value is empty and the deprecated
+// one's is not: an empty value never erases a non-empty one (an empty
+// certificate fingerprint must not drop a pin, nor an empty token a token).
+// Header options are left to headerOptions.
+func canonicalOptions(opts map[string]string) (out map[string]string, spelled map[string]string) {
+	out = make(map[string]string, len(opts))
+	spelled = make(map[string]string, len(opts))
 	for k, v := range opts {
+		if _, _, header := headerOption(k); header {
+			continue
+		}
+		if _, deprecated := CanonicalOption(k); !deprecated {
+			out[k] = v
+			spelled[k] = k
+		}
+	}
+	for k, v := range opts {
+		if _, _, header := headerOption(k); header {
+			continue
+		}
 		newKey, deprecated := CanonicalOption(k)
 		if !deprecated {
-			out[k] = v
 			continue
 		}
 		WarnDeprecatedOption(k, newKey)
-		if _, both := opts[newKey]; both {
+		if cur, both := out[newKey]; both && (cur != "" || v == "") {
 			continue
 		}
 		out[newKey] = v
+		spelled[newKey] = k
 	}
-	return out
+	return out, spelled
 }

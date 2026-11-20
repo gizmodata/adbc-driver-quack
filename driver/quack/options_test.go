@@ -143,7 +143,10 @@ func TestDatabaseDeprecationWarningOnceWithoutValues(t *testing.T) {
 
 func TestUnknownOptionsAreRefusedWithAPrefixedMessage(t *testing.T) {
 	captureWarnings(t)
-	for _, key := range []string{"quack.nope", "quack.auth.tokn", "adbc.nope", "nope"} {
+	for _, key := range []string{"quack.nope", "quack.auth.tokn", "adbc.nope", "nope",
+		// Half-migrated or misspelled keys under the old prefix: accepted and ignored before 1.1.
+		"adbc.quack.tls.enabled", "adbc.quack.tls.certificate_fingerprint", "adbc.quack.ssl_fingerprnt",
+		"adbc.quack.something_else"} {
 		_, err := NewDriver(nil).NewDatabase(map[string]string{key: "x"})
 		if err == nil {
 			t.Errorf("%q: want NOT_IMPLEMENTED, got success", key)
@@ -152,9 +155,12 @@ func TestUnknownOptionsAreRefusedWithAPrefixedMessage(t *testing.T) {
 		if code := adbcStatus(t, err); code != adbc.StatusNotImplemented {
 			t.Errorf("%q: status %v, want NOT_IMPLEMENTED", key, code)
 		}
+		if want := `[quack] unsupported option "` + key + `"`; !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: error %q does not name the key as written", key, err)
+		}
 	}
-	// Accepted as before 1.1 (every adbc.quack.* key was), and spec keys.
-	for _, key := range []string{"adbc.quack.something_else", OptionURI, adbc.OptionKeyUsername, adbc.OptionKeyPassword, "adbc.telemetry.trace_parent"} {
+	// Spec keys and the interop aliases are accepted.
+	for _, key := range []string{"token", "tls", OptionURI, adbc.OptionKeyUsername, adbc.OptionKeyPassword, "adbc.telemetry.trace_parent"} {
 		if _, err := NewDriver(nil).NewDatabase(map[string]string{key: "x"}); err != nil {
 			t.Errorf("%q: %v", key, err)
 		}
@@ -192,5 +198,22 @@ func TestRefusedConnectionErrorNamesTheURLItTried(t *testing.T) {
 	adbcStatus(t, err) // and the [quack] prefix
 	if msg := err.Error(); !strings.Contains(msg, "(tried http://127.0.0.1:1/quack)") {
 		t.Fatalf("the error no longer names the URL it tried: %q", msg)
+	}
+}
+
+// An empty value under the new name must not erase the deprecated name's value
+// (fail-open: an empty fingerprint dropped the pin, an empty token the token).
+func TestDatabaseEmptyNewKeyDoesNotEraseOldValue(t *testing.T) {
+	captureWarnings(t)
+	fp := strings.Repeat("ab", 32)
+	db := newTestDatabase(t, map[string]string{"adbc.quack.ssl_fingerprint": fp, OptionSSLFingerprint: ""})
+	for _, key := range []string{"adbc.quack.ssl_fingerprint", OptionSSLFingerprint} {
+		if got, err := db.GetOption(key); err != nil || got != fp {
+			t.Errorf("GetOption(%q) = %q, %v; want the pinned fingerprint", key, got, err)
+		}
+	}
+	u, err := transport.ParseURI("quack://127.0.0.1:9494", cloneMap(db.opts))
+	if err != nil || !u.TLS || u.SSLFingerprint == "" {
+		t.Fatalf("the pin was dropped: TLS=%v pin=%q err=%v", u.TLS, u.SSLFingerprint, err)
 	}
 }

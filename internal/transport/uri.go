@@ -129,29 +129,42 @@ func ParseURI(rawURL string, opts map[string]string) (QuackURI, error) {
 			return QuackURI{}, fmt.Errorf("transport: option %q is only accepted as an ADBC option, not a URL query parameter", key)
 		}
 	}
-	// Deprecated `adbc.quack.*` keys (in the URL or the options) become
-	// their current names; the current name wins when both are given.
-	q.Params = canonicalOptions(query)
-	for k, v := range canonicalOptions(opts) {
-		if strings.HasPrefix(k, HTTPHeaderPrefix) {
-			name := strings.TrimSpace(k[len(HTTPHeaderPrefix):])
-			if err := validateHeader(name, v); err != nil {
+	// A key under this driver's prefixes that is not one of its options is
+	// refused, in the URL as in the options, so a misspelled or half-migrated
+	// key can't be silently ignored.
+	for _, m := range []map[string]string{query, opts} {
+		for key := range m {
+			if err := CheckOptionKey(key); err != nil {
 				return QuackURI{}, err
 			}
-			if q.ExtraHeaders == nil {
-				q.ExtraHeaders = make(map[string]string)
-			}
-			// An empty value clears a header set earlier on the database.
-			if v == "" {
-				delete(q.ExtraHeaders, name)
-			} else {
-				q.ExtraHeaders[name] = v
-			}
-			continue
 		}
+	}
+	// Deprecated `adbc.quack.*` keys (in the URL or the options) become
+	// their current names; the current name wins when both are given
+	// (unless it is empty and the deprecated one is not).
+	var spelled map[string]string
+	q.Params, spelled = canonicalOptions(query)
+	optParams, optSpelled := canonicalOptions(opts)
+	for k, v := range optParams {
 		if v != "" {
 			q.Params[k] = v
+			spelled[k] = optSpelled[k]
 		}
+	}
+	if q.ExtraHeaders, err = headerOptions(opts); err != nil {
+		return QuackURI{}, err
+	}
+	// keyFor names the key a value came from, as the caller spelled it.
+	keyFor := func(keys ...string) string {
+		for _, k := range keys {
+			if q.Params[k] != "" {
+				if s := spelled[k]; s != "" {
+					return s
+				}
+				return k
+			}
+		}
+		return keys[0]
 	}
 	if q.SSLFingerprint, err = normalizeFingerprint(firstNonEmpty(q.Params["ssl_fingerprint"], q.Params["sslFingerprint"], q.Params[OptionTLSCertificateFingerprint])); err != nil {
 		return QuackURI{}, err
@@ -159,7 +172,9 @@ func ParseURI(rawURL string, opts map[string]string) (QuackURI, error) {
 	tlsRaw := firstNonEmpty(q.Params[OptionTLSEnabled], q.Params["tls"], q.Params["useEncryption"])
 	switch {
 	case tlsRaw != "":
-		q.TLS = parseBool(tlsRaw)
+		if q.TLS, err = parseBool(keyFor(OptionTLSEnabled, "tls", "useEncryption"), tlsRaw); err != nil {
+			return QuackURI{}, err
+		}
 		if !q.TLS && q.SSLFingerprint != "" {
 			return QuackURI{}, fmt.Errorf("transport: ssl_fingerprint pins the server's TLS certificate and cannot be combined with tls=false")
 		}
@@ -312,12 +327,17 @@ func normalizeFingerprint(raw string) (string, error) {
 	return b.String(), nil
 }
 
-func parseBool(s string) bool {
+// parseBool reads a boolean option: true/false, 1/0, yes/no or on/off, in
+// any case. Anything else is an error naming the key, so a typo ("ture")
+// can't quietly mean false (for tls, plain HTTP to a remote host).
+func parseBool(key, s string) (bool, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "true", "1", "yes", "on":
-		return true
+		return true, nil
+	case "false", "0", "no", "off":
+		return false, nil
 	}
-	return false
+	return false, fmt.Errorf("transport: option %q must be true or false, got %q", key, s)
 }
 
 func firstNonEmpty(vs ...string) string {
