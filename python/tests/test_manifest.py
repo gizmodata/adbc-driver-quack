@@ -62,3 +62,27 @@ def test_manifest_dir_scopes(monkeypatch, tmp_path):
     if sys.platform not in ("darwin",) and not sys.platform.startswith("win"):
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
         assert _manifest.manifest_dir("user") == tmp_path / "adbc/drivers"
+
+
+@pytest.mark.parametrize(
+    ("platform_tuple", "keys"),
+    [
+        ("windows_amd64", ["windows_amd64", "windows_amd64_mingw"]),
+        ("windows_arm64", ["windows_arm64", "windows_arm64_mingw"]),
+        ("linux_amd64", ["linux_amd64"]),
+        ("macos_arm64", ["macos_arm64"]),
+    ],
+)
+def test_driver_shared_keys(monkeypatch, tmp_path, platform_tuple, keys):
+    # R on Windows (adbcdrivermanager, built with MinGW) looks up windows_<arch>_mingw;
+    # Python and other MSVC builds look up windows_<arch>. Both must name the library.
+    import adbc_driver_quack
+    from adbc_driver_quack import _manifest
+
+    lib = tmp_path / "libadbc_driver_quack.dll"
+    lib.write_bytes(data=b"")
+    monkeypatch.setattr(_manifest, "_platform_tuple", lambda: platform_tuple)
+    monkeypatch.setattr(adbc_driver_quack, "_driver_path", lambda: str(lib))
+    text = _manifest.render_manifest()
+    shared = text.split("[Driver.shared]\n", 1)[1].splitlines()
+    assert shared == [f"{key} = '{lib.resolve()}'" for key in keys]
