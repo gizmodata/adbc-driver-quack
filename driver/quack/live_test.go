@@ -24,7 +24,7 @@ func liveURI(t *testing.T, opts map[string]string) transport.QuackURI {
 	if token == "" {
 		token = "adbc-driver-quack-it-token"
 	}
-	all := map[string]string{"adbc.quack.token": token}
+	all := map[string]string{"quack.auth.token": token}
 	for k, v := range opts {
 		all[k] = v
 	}
@@ -40,7 +40,7 @@ func liveURI(t *testing.T, opts map[string]string) transport.QuackURI {
 // negative twin (heartbeat stopped) is refused once the lease runs out, so
 // the positive result is the heartbeat's doing.
 func TestHeartbeatKeepsAnIdleConnectionAlive(t *testing.T) {
-	u := liveURI(t, map[string]string{"adbc.quack.heartbeat_timeout_seconds": "2"})
+	u := liveURI(t, map[string]string{"quack.session.heartbeat_timeout_seconds": "2"})
 	ctx := context.Background()
 
 	alive, err := newSession(ctx, u)

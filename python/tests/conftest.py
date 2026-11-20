@@ -45,7 +45,7 @@ class QuackServer:
 
     @property
     def db_kwargs(self) -> dict[str, str]:
-        return {"adbc.quack.token": self.token}
+        return {"quack.auth.token": self.token}
 
 
 def _pick_free_port() -> int:

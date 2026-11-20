@@ -16,30 +16,36 @@ import (
 	"github.com/gizmodata/adbc-driver-quack/internal/transport"
 )
 
-// ADBC option keys used by the Quack driver. They follow the
-// `adbc.<vendor>.<noun>` convention used by adbc-driver-flightsql.
+// ADBC option keys used by the Quack driver. Driver-specific keys follow the
+// ADBC driver style guide (https://adbc-drivers.org/building-drivers/style-guide.html):
+// `quack[.group].option`, grouped as quack.auth.*, quack.tls.*,
+// quack.session.* and quack.http.*. The pre-1.1 `adbc.quack.*` spellings
+// still work for setting and getting, and print a deprecation warning to
+// stderr once per key per process (see DeprecatedOptions).
 const (
-	OptionURI   = adbc.OptionKeyURI // "adbc.uri" — the quack:// connection URL
-	OptionToken = "adbc.quack.token"
+	OptionURI   = adbc.OptionKeyURI // "uri" — the quack:// connection URL
+	OptionToken = transport.OptionAuthToken
 	// OptionTokenEnv / OptionTokenFile name an environment variable /
 	// local file to read the token from. Accepted only as ADBC options,
 	// never as URL query parameters (a shared URL must not be able to
 	// exfiltrate a local secret to the host it names).
-	OptionTokenEnv  = "adbc.quack.token_env"
-	OptionTokenFile = "adbc.quack.token_file"
-	OptionTLS       = "adbc.quack.tls"
+	OptionTokenEnv  = transport.OptionAuthTokenEnv
+	OptionTokenFile = transport.OptionAuthTokenFile
+	// OptionTLS is "true" for HTTPS, "false" for plain HTTP; unset follows
+	// DuckDB 2.0 (plain HTTP to loopback, HTTPS to any other host).
+	OptionTLS = transport.OptionTLSEnabled
 	// OptionSSLFingerprint pins the server certificate by its SHA-256
 	// fingerprint instead of CA verification; implies TLS.
-	OptionSSLFingerprint = "adbc.quack.ssl_fingerprint"
+	OptionSSLFingerprint = transport.OptionTLSCertificateFingerprint
 	// OptionHeartbeatTimeout is the connection lease, in seconds, the
 	// driver asks for (default 60) and renews while idle.
-	OptionHeartbeatTimeout = "adbc.quack.heartbeat_timeout_seconds"
+	OptionHeartbeatTimeout = transport.OptionSessionHeartbeatTimeout
 	// OptionClientID is an opaque client identifier (empty or >= 4 chars).
-	OptionClientID = "adbc.quack.client_id"
+	OptionClientID = transport.OptionSessionClientID
 	// HTTP timeouts: plain digits are seconds, anything else is parsed
 	// as a Go duration (e.g. "1.5s").
-	OptionConnectTimeout = "adbc.quack.rpc.timeout_seconds.connect"
-	OptionRequestTimeout = "adbc.quack.rpc.timeout_seconds.request"
+	OptionConnectTimeout = transport.OptionHTTPConnectTimeout
+	OptionRequestTimeout = transport.OptionHTTPRequestTimeout
 	OptionIngestTable    = adbc.OptionKeyIngestTargetTable
 	// OptionHTTPHeaderPrefix + <Header-Name> sets an extra HTTP header
 	// sent with every request (proxy/LB auth); an empty value clears it.
@@ -48,6 +54,11 @@ const (
 	// never as URL query parameters.
 	OptionHTTPHeaderPrefix = transport.HTTPHeaderPrefix
 )
+
+// DeprecatedOptions returns the pre-1.1 option keys and the current key
+// each one now names (e.g. "adbc.quack.token" -> "quack.auth.token").
+// "adbc.quack.http.header.<Name>" likewise names "quack.http.header.<Name>".
+func DeprecatedOptions() map[string]string { return transport.DeprecatedOptions() }
 
 // NewDriver returns a quack ADBC driver.
 func NewDriver(alloc memory.Allocator) adbc.Driver {
@@ -81,7 +92,13 @@ func knownDatabaseOption(key string) bool {
 	case OptionURI, adbc.OptionKeyUsername, adbc.OptionKeyPassword, "token", "tls":
 		return true
 	}
-	return strings.HasPrefix(key, "adbc.quack.") || strings.HasPrefix(key, "adbc.telemetry.")
+	if transport.KnownOption(key) {
+		return true
+	}
+	// Before 1.1 every `adbc.quack.*` key was accepted; the old spellings
+	// of current options are deprecated aliases, and other `adbc.quack.*`
+	// keys are still accepted (and ignored) as they were.
+	return strings.HasPrefix(key, transport.DeprecatedOptionPrefix) || strings.HasPrefix(key, "adbc.telemetry.")
 }
 
 type databaseImpl struct {
@@ -96,12 +113,32 @@ func (d *databaseImpl) SetOptions(opts map[string]string) error {
 			return notImplemented(k)
 		}
 	}
+	for k := range opts {
+		if newKey, deprecated := transport.CanonicalOption(k); deprecated {
+			transport.WarnDeprecatedOption(k, newKey)
+		}
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	for k, v := range opts {
 		d.opts[k] = v
 	}
 	return nil
+}
+
+// lookupLocked returns the value of the option key names, under its current
+// name or any deprecated spelling of it; the current name wins. d.mu is held.
+func (d *databaseImpl) lookupLocked(key string) (string, bool) {
+	canonical, _ := transport.CanonicalOption(key)
+	if v, ok := d.opts[canonical]; ok {
+		return v, true
+	}
+	for k, v := range d.opts {
+		if c, deprecated := transport.CanonicalOption(k); deprecated && c == canonical {
+			return v, true
+		}
+	}
+	return "", false
 }
 
 func (d *databaseImpl) Open(ctx context.Context) (adbc.Connection, error) {
@@ -111,11 +148,11 @@ func (d *databaseImpl) Open(ctx context.Context) (adbc.Connection, error) {
 	delete(overrides, OptionURI)
 	d.mu.Unlock()
 	if rawURL == "" {
-		return nil, errStatus(adbc.StatusInvalidArgument, "quack: missing required option %q", OptionURI)
+		return nil, errStatus(adbc.StatusInvalidArgument, "missing required option %q", OptionURI)
 	}
 	uri, err := transport.ParseURI(rawURL, overrides)
 	if err != nil {
-		return nil, errStatus(adbc.StatusInvalidArgument, "quack: %v", err)
+		return nil, errStatus(adbc.StatusInvalidArgument, "%v", err)
 	}
 	s, err := newSession(ctx, uri)
 	if err != nil {
@@ -492,7 +529,7 @@ func cloneMap(m map[string]string) map[string]string {
 }
 
 func errStatus(code adbc.Status, format string, args ...interface{}) error {
-	return adbc.Error{Code: code, Msg: fmt.Sprintf(format, args...)}
+	return newError(code, fmt.Sprintf(format, args...), "")
 }
 
 // Compile-time interface checks.

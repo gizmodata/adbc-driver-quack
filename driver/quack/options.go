@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/apache/arrow-adbc/go/adbc"
+
+	"github.com/gizmodata/adbc-driver-quack/internal/transport"
 )
 
 // ADBC 1.1 GetSetOptions for the database, connection and statement.
@@ -13,17 +15,17 @@ import (
 // StatusNotImplemented, as the ADBC spec asks.
 
 func notFound(key string) error {
-	return adbc.Error{Code: adbc.StatusNotFound, Msg: "unknown option " + strconv.Quote(key)}
+	return newError(adbc.StatusNotFound, "unknown option "+strconv.Quote(key), "")
 }
 
 func notImplemented(key string) error {
-	return adbc.Error{Code: adbc.StatusNotImplemented, Msg: "unsupported option " + strconv.Quote(key)}
+	return newError(adbc.StatusNotImplemented, "unsupported option "+strconv.Quote(key), "")
 }
 
 func parseIntOption(key, v string) (int64, error) {
 	n, err := strconv.ParseInt(v, 10, 64)
 	if err != nil {
-		return 0, adbc.Error{Code: adbc.StatusInvalidState, Msg: "option " + key + " is not an integer"}
+		return 0, newError(adbc.StatusInvalidState, "option "+strconv.Quote(key)+" is not an integer", "")
 	}
 	return n, nil
 }
@@ -31,14 +33,15 @@ func parseIntOption(key, v string) (int64, error) {
 func parseDoubleOption(key, v string) (float64, error) {
 	n, err := strconv.ParseFloat(v, 64)
 	if err != nil {
-		return 0, adbc.Error{Code: adbc.StatusInvalidState, Msg: "option " + key + " is not a number"}
+		return 0, newError(adbc.StatusInvalidState, "option "+strconv.Quote(key)+" is not a number", "")
 	}
 	return n, nil
 }
 
-// secretOption reports keys whose values GetOption must not hand back.
+// secretOption reports keys whose values GetOption must not hand back
+// (under their current name or a deprecated one).
 func secretOption(key string) bool {
-	k := strings.ToLower(key)
+	k, _ := transport.CanonicalOption(strings.ToLower(key))
 	return k == OptionToken || k == "password" || k == "token" ||
 		strings.HasPrefix(k, OptionHTTPHeaderPrefix)
 }
@@ -56,9 +59,12 @@ func (d *databaseImpl) SetOptionDouble(key string, value float64) error {
 	return d.SetOption(key, strconv.FormatFloat(value, 'g', -1, 64))
 }
 func (d *databaseImpl) GetOption(key string) (string, error) {
+	if newKey, deprecated := transport.CanonicalOption(key); deprecated {
+		transport.WarnDeprecatedOption(key, newKey)
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	v, ok := d.opts[key]
+	v, ok := d.lookupLocked(key)
 	if !ok || secretOption(key) {
 		return "", notFound(key)
 	}
@@ -105,7 +111,7 @@ func (c *connectionImpl) GetOption(key string) (string, error) {
 				}
 			}
 		}
-		return "", adbc.Error{Code: adbc.StatusInternal, Msg: "the server returned no " + fn}
+		return "", newError(adbc.StatusInternal, "the server returned no "+fn, "")
 	}
 	return "", notFound(key)
 }

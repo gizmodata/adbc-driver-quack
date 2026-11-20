@@ -589,7 +589,7 @@ def test_bad_token_rejected(quack_server):
         # CONNECTION_REQUEST handshake gets rejected, so the wrapper is
         # the call we expect to throw.
         adbc_driver_quack.dbapi.connect(
-            quack_server.uri, db_kwargs={"adbc.quack.token": "wrong-token"}
+            quack_server.uri, db_kwargs={"quack.auth.token": "wrong-token"}
         )
 
 
@@ -611,7 +611,7 @@ def test_commit_with_nothing_pending_is_noop(quack_server):
 
 
 def test_token_env(quack_server):
-    """adbc.quack.token_env reads the auth token from an env var.
+    """quack.auth.token_env reads the auth token from an env var.
 
     Runs in a subprocess because the Go runtime inside the driver
     shared library snapshots the process environment when it first
@@ -629,7 +629,7 @@ def test_token_env(quack_server):
         import adbc_driver_quack.dbapi
 
         with adbc_driver_quack.dbapi.connect(
-            {quack_server.uri!r}, db_kwargs={{"adbc.quack.token_env": "QUACK_IT_TOKEN"}}
+            {quack_server.uri!r}, db_kwargs={{"quack.auth.token_env": "QUACK_IT_TOKEN"}}
         ) as conn, conn.cursor() as cur:
             cur.execute("SELECT 1 AS x")
             assert cur.fetch_arrow_table().to_pylist()[0]["x"] == 1
@@ -643,13 +643,13 @@ def test_token_env(quack_server):
 
 
 def test_token_file(quack_server, tmp_path):
-    """adbc.quack.token_file reads the auth token from a local file."""
+    """quack.auth.token_file reads the auth token from a local file."""
     import adbc_driver_quack.dbapi
 
     token_file = tmp_path / "token"
     token_file.write_text(quack_server.token + "\n")
     with adbc_driver_quack.dbapi.connect(
-        quack_server.uri, db_kwargs={"adbc.quack.token_file": str(token_file)}
+        quack_server.uri, db_kwargs={"quack.auth.token_file": str(token_file)}
     ) as conn, conn.cursor() as cur:
         cur.execute("SELECT 1 AS x")
         assert cur.fetch_arrow_table().to_pylist()[0]["x"] == 1
@@ -662,3 +662,56 @@ def test_token_env_rejected_on_url(quack_server):
 
     with pytest.raises(Exception, match="ADBC option"):
         adbc_driver_quack.dbapi.connect(quack_server.uri + "?tokenEnv=SOME_VAR")
+
+
+def test_deprecated_option_keys_still_work_and_warn_once(quack_server):
+    """The pre-1.1 ``adbc.quack.*`` keys still connect, through the C library,
+    and print one deprecation line per key to stderr, naming keys only.
+
+    Runs in a subprocess so the warning (printed once per process by the Go
+    driver, straight to file descriptor 2) can be captured.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent(
+        f"""
+        import adbc_driver_quack.dbapi
+
+        for _ in range(2):
+            with adbc_driver_quack.dbapi.connect(
+                {quack_server.uri!r},
+                db_kwargs={{"adbc.quack.token": {quack_server.token!r}, "adbc.quack.client_id": "deprecated-keys"}},
+            ) as conn, conn.cursor() as cur:
+                cur.execute("SELECT 1 AS x")
+                assert cur.fetch_arrow_table().to_pylist()[0]["x"] == 1
+        """
+    )
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr
+    lines = sorted(line for line in result.stderr.splitlines() if "deprecated" in line)
+    assert lines == [
+        '[quack] option "adbc.quack.client_id" is deprecated; use "quack.session.client_id"',
+        '[quack] option "adbc.quack.token" is deprecated; use "quack.auth.token"',
+    ], result.stderr
+    assert quack_server.token not in result.stderr
+    assert "deprecated-keys" not in result.stderr
+
+
+def test_error_messages_carry_the_driver_slug(quack_server):
+    """Errors read ``[quack] message`` (the ADBC driver style guide), once,
+    and a '%' in a server message reaches the caller unchanged."""
+    import adbc_driver_quack.dbapi
+
+    with _connect(quack_server) as conn, conn.cursor() as cur:
+        with pytest.raises(Exception) as excinfo:
+            cur.execute("SELECT error('50% off: a server message with a percent sign')")
+    message = str(excinfo.value)
+    assert "[quack] " in message, message
+    assert message.count("[quack]") == 1, message
+    assert "50% off: a server message with a percent sign" in message, message
+
+    with pytest.raises(Exception) as excinfo:
+        adbc_driver_quack.dbapi.connect(quack_server.uri, db_kwargs={"quack.nope": "x"})
+    assert '[quack] unsupported option "quack.nope"' in str(excinfo.value)

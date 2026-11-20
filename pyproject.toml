@@ -59,8 +59,14 @@ dbapi = ["pandas"]
 test = [
     "pandas >=3.1.1",
     "pytest >=9.2.0",
-    "duckdb >=2.0.0",
-    "hardcharger[adbc] >=2.10.0",
+    # Pinned below the latest (2.0.1, out 2026-11-20) for one reason: the
+    # adbc_scanner tests install the extension from Query.Farm, which has no
+    # build for DuckDB 2.0.1 yet (https://duckdb-extensions.query.farm/v2.0.1/
+    # linux_amd64/adbc_scanner.duckdb_extension.gz answers 404). Move to the
+    # latest once it answers 200. The Go live suite and the conformance suite
+    # (CI) run against the latest duckdb.
+    "duckdb ==2.0.0",
+    "hardcharger[adbc] >=2.13.3",
 ]
 
 [project.urls]
@@ -70,7 +76,7 @@ repository = "https://github.com/gizmodata/adbc-driver-quack"
 issues = "https://github.com/gizmodata/adbc-driver-quack/issues"
 
 [build-system]
-requires = ["setuptools >= 77.0.0"]
+requires = ["setuptools >= 84.2.1"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]

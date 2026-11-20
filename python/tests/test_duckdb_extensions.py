@@ -108,7 +108,7 @@ def engine(request, quack_server, driver_path, sample_table):
                 driver {lit(library)},
                 entrypoint 'AdbcDriverQuackInit',
                 uri {lit(quack_server.uri)},
-                extra_options MAP {{'adbc.quack.token': {lit(quack_server.token)}}}
+                extra_options MAP {{'quack.auth.token': {lit(quack_server.token)}}}
             )"""
         )
         run("DETACH DATABASE IF EXISTS q")
@@ -134,6 +134,16 @@ def test_attach_with_filter_pushdown(engine):
 def test_adbc_scan_runs_quack_sql(engine):
     assert engine.run("SELECT * FROM adbc_scan('q', 'SELECT 42 AS x')") == [(42,)]
     assert engine.one("SELECT SUM(id) FROM adbc_scan('q', 'SELECT * FROM ext_t')") == (45,)
+
+
+def test_adbc_scan_error_carries_the_server_message(engine):
+    """A server error reaches adbc_scanner's caller with its text intact and the driver's
+    ``[quack]`` prefix."""
+    with pytest.raises(Exception) as excinfo:
+        engine.run("SELECT * FROM adbc_scan('q', 'SELECT error(''50% off: a server message'')')")
+    message = str(excinfo.value)
+    assert "50% off: a server message" in message, message
+    assert "[quack] " in message, message
 
 
 def test_writes_into_quack(engine, quack_server):
@@ -169,7 +179,7 @@ def test_columnar_adbc_extension(quack_server, sample_table, tmp_path, monkeypat
 
             [Options]
             uri = "{quack_server.uri}"
-            "adbc.quack.token" = "{quack_server.token}"
+            "quack.auth.token" = "{quack_server.token}"
             """
         ),
         encoding="utf-8",
