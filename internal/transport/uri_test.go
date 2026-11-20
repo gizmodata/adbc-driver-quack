@@ -39,9 +39,9 @@ func TestTLSDefaultsFollowDuckDB(t *testing.T) {
 		{"quack:localhost:9494", nil, false},
 		{"quack://db.example.com", nil, true},
 		{"quack://db.example.com?tls=false", nil, false},
-		{"quack://db.example.com", map[string]string{"adbc.quack.tls": "false"}, false},
+		{"quack://db.example.com", map[string]string{"quack.tls.enabled": "false"}, false},
 		{"quack://localhost?tls=true", nil, true},
-		{"quack://localhost", map[string]string{"adbc.quack.ssl_fingerprint": strings.Repeat("ab", 32)}, true},
+		{"quack://localhost", map[string]string{"quack.tls.certificate_fingerprint": strings.Repeat("ab", 32)}, true},
 	}
 	for _, tc := range cases {
 		u, err := ParseURI(tc.url, tc.opts)
@@ -66,7 +66,7 @@ func TestDuckDBSpellingParses(t *testing.T) {
 
 func TestFingerprintNormalization(t *testing.T) {
 	colon := "SHA256:2b:31:f0:" + strings.TrimSuffix(strings.Repeat("aa:", 29), ":")
-	u, err := ParseURI("quack://h", map[string]string{"adbc.quack.ssl_fingerprint": colon})
+	u, err := ParseURI("quack://h", map[string]string{"quack.tls.certificate_fingerprint": colon})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,24 +74,24 @@ func TestFingerprintNormalization(t *testing.T) {
 		t.Errorf("got %q", u.SSLFingerprint)
 	}
 	for _, bad := range []string{"zz", strings.Repeat("ab", 31)} {
-		if _, err := ParseURI("quack://h", map[string]string{"adbc.quack.ssl_fingerprint": bad}); err == nil {
+		if _, err := ParseURI("quack://h", map[string]string{"quack.tls.certificate_fingerprint": bad}); err == nil {
 			t.Errorf("%q: expected an error", bad)
 		}
 	}
-	if _, err := ParseURI("quack://h?tls=false", map[string]string{"adbc.quack.ssl_fingerprint": strings.Repeat("ab", 32)}); err == nil {
+	if _, err := ParseURI("quack://h?tls=false", map[string]string{"quack.tls.certificate_fingerprint": strings.Repeat("ab", 32)}); err == nil {
 		t.Error("tls=false with a pinned fingerprint must be refused")
 	}
 }
 
 func TestClientIDAndHeartbeatOptions(t *testing.T) {
-	u, err := ParseURI("quack://h", map[string]string{"adbc.quack.client_id": "etl-1", "adbc.quack.heartbeat_timeout_seconds": "30"})
+	u, err := ParseURI("quack://h", map[string]string{"quack.session.client_id": "etl-1", "quack.session.heartbeat_timeout_seconds": "30"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if u.ClientID != "etl-1" || u.HeartbeatTimeout != 30*time.Second {
 		t.Errorf("got %q %v", u.ClientID, u.HeartbeatTimeout)
 	}
-	if _, err := ParseURI("quack://h", map[string]string{"adbc.quack.client_id": "abc"}); err == nil {
+	if _, err := ParseURI("quack://h", map[string]string{"quack.session.client_id": "abc"}); err == nil {
 		t.Error("a client_id under 4 characters must be refused")
 	}
 }
@@ -129,18 +129,18 @@ func TestOptsOverrideParams(t *testing.T) {
 }
 
 func TestADBCTLSOption(t *testing.T) {
-	u, err := ParseURI("quack://h:9494", map[string]string{"adbc.quack.tls": "true"})
+	u, err := ParseURI("quack://h:9494", map[string]string{"quack.tls.enabled": "true"})
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	if !u.TLS {
-		t.Errorf("tls: expected true from adbc.quack.tls option")
+		t.Errorf("tls: expected true from quack.tls.enabled option")
 	}
 }
 
 func TestTokenEnv(t *testing.T) {
 	t.Setenv("QUACK_TEST_TOKEN", "  secret-from-env\n")
-	u, err := ParseURI("quack://h:9494", map[string]string{"adbc.quack.token_env": "QUACK_TEST_TOKEN"})
+	u, err := ParseURI("quack://h:9494", map[string]string{"quack.auth.token_env": "QUACK_TEST_TOKEN"})
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestTokenEnv(t *testing.T) {
 }
 
 func TestTokenEnvUnset(t *testing.T) {
-	_, err := ParseURI("quack://h:9494", map[string]string{"adbc.quack.token_env": "QUACK_TEST_TOKEN_UNSET"})
+	_, err := ParseURI("quack://h:9494", map[string]string{"quack.auth.token_env": "QUACK_TEST_TOKEN_UNSET"})
 	if err == nil || !strings.Contains(err.Error(), "unset or empty") {
 		t.Errorf("expected unset-env error, got %v", err)
 	}
@@ -161,7 +161,7 @@ func TestTokenFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("secret-from-file\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	u, err := ParseURI("quack://h:9494", map[string]string{"adbc.quack.token_file": path})
+	u, err := ParseURI("quack://h:9494", map[string]string{"quack.auth.token_file": path})
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -171,14 +171,14 @@ func TestTokenFile(t *testing.T) {
 }
 
 func TestTokenFileMissingOrEmpty(t *testing.T) {
-	if _, err := ParseURI("quack://h:9494", map[string]string{"adbc.quack.token_file": filepath.Join(t.TempDir(), "nope")}); err == nil {
+	if _, err := ParseURI("quack://h:9494", map[string]string{"quack.auth.token_file": filepath.Join(t.TempDir(), "nope")}); err == nil {
 		t.Errorf("expected error for missing token file")
 	}
 	empty := filepath.Join(t.TempDir(), "empty")
 	if err := os.WriteFile(empty, []byte(" \n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ParseURI("quack://h:9494", map[string]string{"adbc.quack.token_file": empty}); err == nil || !strings.Contains(err.Error(), "empty") {
+	if _, err := ParseURI("quack://h:9494", map[string]string{"quack.auth.token_file": empty}); err == nil || !strings.Contains(err.Error(), "empty") {
 		t.Errorf("expected empty-file error, got %v", err)
 	}
 }
@@ -186,8 +186,8 @@ func TestTokenFileMissingOrEmpty(t *testing.T) {
 func TestTokenPrecedence(t *testing.T) {
 	t.Setenv("QUACK_TEST_TOKEN", "from-env")
 	u, err := ParseURI("quack://h:9494", map[string]string{
-		"adbc.quack.token":     "direct",
-		"adbc.quack.token_env": "QUACK_TEST_TOKEN",
+		"quack.auth.token":     "direct",
+		"quack.auth.token_env": "QUACK_TEST_TOKEN",
 	})
 	if err != nil {
 		t.Fatalf("parse: %v", err)
@@ -198,7 +198,7 @@ func TestTokenPrecedence(t *testing.T) {
 }
 
 func TestTokenEnvFileRejectedInURL(t *testing.T) {
-	for _, q := range []string{"tokenEnv=PATH", "tokenFile=/etc/passwd", "adbc.quack.token_env=PATH", "adbc.quack.token_file=/etc/passwd"} {
+	for _, q := range []string{"tokenEnv=PATH", "tokenFile=/etc/passwd", "quack.auth.token_env=PATH", "quack.auth.token_file=/etc/passwd"} {
 		if _, err := ParseURI("quack://h:9494?"+q, nil); err == nil {
 			t.Errorf("expected %q in URL to be rejected", q)
 		}
@@ -217,7 +217,7 @@ func TestTimeoutDefaults(t *testing.T) {
 
 func TestTimeoutParsing(t *testing.T) {
 	u, err := ParseURI("quack://h:9494?connectTimeout=5", map[string]string{
-		"adbc.quack.rpc.timeout_seconds.request": "90",
+		"quack.http.request_timeout_seconds": "90",
 	})
 	if err != nil {
 		t.Fatalf("parse: %v", err)
@@ -229,7 +229,7 @@ func TestTimeoutParsing(t *testing.T) {
 		t.Errorf("request timeout: got %v", u.RequestTimeout)
 	}
 
-	u, err = ParseURI("quack://h:9494", map[string]string{"adbc.quack.rpc.timeout_seconds.connect": "1.5s"})
+	u, err = ParseURI("quack://h:9494", map[string]string{"quack.http.connect_timeout_seconds": "1.5s"})
 	if err != nil {
 		t.Fatalf("parse duration form: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestExtraHeadersEmptyValueClears(t *testing.T) {
 }
 
 func TestExtraHeadersRejectedInURL(t *testing.T) {
-	_, err := ParseURI("quack://h:9494?adbc.quack.http.header.X-Evil=1", nil)
+	_, err := ParseURI("quack://h:9494?quack.http.header.X-Evil=1", nil)
 	if err == nil || !strings.Contains(err.Error(), "not a URL query parameter") {
 		t.Fatalf("expected URL-param rejection, got %v", err)
 	}

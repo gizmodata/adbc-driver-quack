@@ -202,8 +202,8 @@ func (s *statementImpl) streamIngest(ctx context.Context, cols []ingestColumn, t
 func ingestError(err error) error {
 	var se *transport.ErrServerError
 	if errors.As(err, &se) && strings.EqualFold(se.ExceptionType, "Binder") {
-		return adbc.Error{Code: adbc.StatusAlreadyExists, SqlState: sqlState("42S01"),
-			Msg: "ingest: the bound data does not match the existing table: " + se.Error()}
+		return newError(adbc.StatusAlreadyExists,
+			"ingest: the bound data does not match the existing table: "+se.Error(), "42S01")
 	}
 	return fromTransportError(err)
 }

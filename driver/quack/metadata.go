@@ -84,7 +84,7 @@ func (c *connectionImpl) getTableSchemaImpl(ctx context.Context, catalog, dbSche
 		}
 	}
 	if len(fields) == 0 {
-		return nil, adbc.Error{Code: adbc.StatusNotFound, Msg: fmt.Sprintf("table %q not found", tableName), SqlState: sqlState("42S02")}
+		return nil, newError(adbc.StatusNotFound, fmt.Sprintf("table %q not found", tableName), "42S02")
 	}
 	// The printed type names lose detail (TIMESTAMP_S, nested types, ...):
 	// take the exact types from an empty scan of the table, which carries

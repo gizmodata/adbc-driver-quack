@@ -64,12 +64,6 @@ type QuackURI struct {
 	ExtraHeaders map[string]string
 }
 
-// HTTPHeaderPrefix is the ADBC option prefix for extra HTTP headers:
-// `adbc.quack.http.header.<Header-Name>`. Accepted only as an ADBC
-// option — never as a URL query parameter, so a pasted URL cannot
-// inject headers into the driver's requests.
-const HTTPHeaderPrefix = "adbc.quack.http.header."
-
 // AcceptsURL reports whether s starts with a recognized Quack URL prefix.
 func AcceptsURL(s string) bool {
 	return strings.HasPrefix(s, "quack:") || strings.HasPrefix(s, "jdbc:"+URLScheme)
@@ -115,53 +109,72 @@ func ParseURI(rawURL string, opts map[string]string) (QuackURI, error) {
 	if path := strings.TrimPrefix(parsed.Path, "/"); path != "" {
 		q.Database = path
 	}
+	query := make(map[string]string)
 	for key, vals := range parsed.Query() {
 		if len(vals) > 0 {
-			q.Params[key] = vals[0]
+			query[key] = vals[0]
 		}
 	}
 	// tokenEnv/tokenFile make the driver read a local secret and send it
 	// to the host in the URL — accepting them from the URL would let a
 	// pasted or shared URL exfiltrate an arbitrary env var or file to an
-	// attacker-chosen server. ADBC options (or opts) only.
-	for _, key := range []string{"tokenEnv", "tokenFile", "adbc.quack.token_env", "adbc.quack.token_file"} {
-		if _, ok := q.Params[key]; ok {
+	// attacker-chosen server. ADBC options (or opts) only. Checked before
+	// the keys are canonicalized, so the error names the key as written.
+	for key := range query {
+		canonical, _ := CanonicalOption(key)
+		switch {
+		case key == "tokenEnv", key == "tokenFile",
+			canonical == OptionAuthTokenEnv, canonical == OptionAuthTokenFile,
+			strings.HasPrefix(canonical, HTTPHeaderPrefix):
 			return QuackURI{}, fmt.Errorf("transport: option %q is only accepted as an ADBC option, not a URL query parameter", key)
 		}
 	}
-	for key := range q.Params {
-		if strings.HasPrefix(key, HTTPHeaderPrefix) {
-			return QuackURI{}, fmt.Errorf("transport: option %q is only accepted as an ADBC option, not a URL query parameter", key)
-		}
-	}
-	for k, v := range opts {
-		if strings.HasPrefix(k, HTTPHeaderPrefix) {
-			name := strings.TrimSpace(k[len(HTTPHeaderPrefix):])
-			if err := validateHeader(name, v); err != nil {
+	// A key under this driver's prefixes that is not one of its options is
+	// refused, in the URL as in the options, so a misspelled or half-migrated
+	// key can't be silently ignored.
+	for _, m := range []map[string]string{query, opts} {
+		for key := range m {
+			if err := CheckOptionKey(key); err != nil {
 				return QuackURI{}, err
 			}
-			if q.ExtraHeaders == nil {
-				q.ExtraHeaders = make(map[string]string)
-			}
-			// An empty value clears a header set earlier on the database.
-			if v == "" {
-				delete(q.ExtraHeaders, name)
-			} else {
-				q.ExtraHeaders[name] = v
-			}
-			continue
 		}
+	}
+	// Deprecated `adbc.quack.*` keys (in the URL or the options) become
+	// their current names; the current name wins when both are given
+	// (unless it is empty and the deprecated one is not).
+	var spelled map[string]string
+	q.Params, spelled = canonicalOptions(query)
+	optParams, optSpelled := canonicalOptions(opts)
+	for k, v := range optParams {
 		if v != "" {
 			q.Params[k] = v
+			spelled[k] = optSpelled[k]
 		}
 	}
-	if q.SSLFingerprint, err = normalizeFingerprint(firstNonEmpty(q.Params["ssl_fingerprint"], q.Params["sslFingerprint"], q.Params["adbc.quack.ssl_fingerprint"])); err != nil {
+	if q.ExtraHeaders, err = headerOptions(opts); err != nil {
 		return QuackURI{}, err
 	}
-	tlsRaw := firstNonEmpty(q.Params["adbc.quack.tls"], q.Params["tls"], q.Params["useEncryption"])
+	// keyFor names the key a value came from, as the caller spelled it.
+	keyFor := func(keys ...string) string {
+		for _, k := range keys {
+			if q.Params[k] != "" {
+				if s := spelled[k]; s != "" {
+					return s
+				}
+				return k
+			}
+		}
+		return keys[0]
+	}
+	if q.SSLFingerprint, err = normalizeFingerprint(firstNonEmpty(q.Params["ssl_fingerprint"], q.Params["sslFingerprint"], q.Params[OptionTLSCertificateFingerprint])); err != nil {
+		return QuackURI{}, err
+	}
+	tlsRaw := firstNonEmpty(q.Params[OptionTLSEnabled], q.Params["tls"], q.Params["useEncryption"])
 	switch {
 	case tlsRaw != "":
-		q.TLS = parseBool(tlsRaw)
+		if q.TLS, err = parseBool(keyFor(OptionTLSEnabled, "tls", "useEncryption"), tlsRaw); err != nil {
+			return QuackURI{}, err
+		}
 		if !q.TLS && q.SSLFingerprint != "" {
 			return QuackURI{}, fmt.Errorf("transport: ssl_fingerprint pins the server's TLS certificate and cannot be combined with tls=false")
 		}
@@ -170,11 +183,11 @@ func ParseURI(rawURL string, opts map[string]string) (QuackURI, error) {
 	default:
 		q.TLS = !IsLocalHost(q.Host)
 	}
-	q.ClientID = firstNonEmpty(q.Params["adbc.quack.client_id"], q.Params["clientId"], q.Params["client_id"])
+	q.ClientID = firstNonEmpty(q.Params[OptionSessionClientID], q.Params["clientId"], q.Params["client_id"])
 	if q.ClientID != "" && len(q.ClientID) < 4 {
 		return QuackURI{}, fmt.Errorf("transport: client_id must be empty or at least 4 characters")
 	}
-	if q.HeartbeatTimeout, err = parseTimeout(q.Params, "heartbeatTimeout", "adbc.quack.heartbeat_timeout_seconds", DefaultHeartbeatTimeout); err != nil {
+	if q.HeartbeatTimeout, err = parseTimeout(q.Params, "heartbeatTimeout", OptionSessionHeartbeatTimeout, DefaultHeartbeatTimeout); err != nil {
 		return QuackURI{}, err
 	}
 	if q.HeartbeatTimeout < time.Second {
@@ -186,10 +199,10 @@ func ParseURI(rawURL string, opts map[string]string) (QuackURI, error) {
 		return QuackURI{}, err
 	}
 	q.Token = token
-	if q.ConnectTimeout, err = parseTimeout(q.Params, "connectTimeout", "adbc.quack.rpc.timeout_seconds.connect", DefaultConnectTimeout); err != nil {
+	if q.ConnectTimeout, err = parseTimeout(q.Params, "connectTimeout", OptionHTTPConnectTimeout, DefaultConnectTimeout); err != nil {
 		return QuackURI{}, err
 	}
-	if q.RequestTimeout, err = parseTimeout(q.Params, "requestTimeout", "adbc.quack.rpc.timeout_seconds.request", DefaultRequestTimeout); err != nil {
+	if q.RequestTimeout, err = parseTimeout(q.Params, "requestTimeout", OptionHTTPRequestTimeout, DefaultRequestTimeout); err != nil {
 		return QuackURI{}, err
 	}
 	return q, nil
@@ -217,17 +230,17 @@ func validateHeader(name, value string) error {
 // alias) wins, then a token read from the environment variable named
 // by tokenEnv, then the contents of the file named by tokenFile.
 func resolveToken(params map[string]string) (string, error) {
-	if tok := firstNonEmpty(params["token"], params["password"], params["adbc.quack.token"]); tok != "" {
+	if tok := firstNonEmpty(params["token"], params["password"], params[OptionAuthToken]); tok != "" {
 		return tok, nil
 	}
-	if env := firstNonEmpty(params["tokenEnv"], params["adbc.quack.token_env"]); env != "" {
+	if env := firstNonEmpty(params["tokenEnv"], params[OptionAuthTokenEnv]); env != "" {
 		val := strings.TrimSpace(os.Getenv(env))
 		if val == "" {
 			return "", fmt.Errorf("transport: token environment variable is unset or empty: %s", env)
 		}
 		return val, nil
 	}
-	if file := firstNonEmpty(params["tokenFile"], params["adbc.quack.token_file"]); file != "" {
+	if file := firstNonEmpty(params["tokenFile"], params[OptionAuthTokenFile]); file != "" {
 		raw, err := os.ReadFile(file)
 		if err != nil {
 			return "", fmt.Errorf("transport: read token file %s: %w", file, err)
@@ -314,12 +327,17 @@ func normalizeFingerprint(raw string) (string, error) {
 	return b.String(), nil
 }
 
-func parseBool(s string) bool {
+// parseBool reads a boolean option: true/false, 1/0, yes/no or on/off, in
+// any case. Anything else is an error naming the key, so a typo ("ture")
+// can't quietly mean false (for tls, plain HTTP to a remote host).
+func parseBool(key, s string) (bool, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "true", "1", "yes", "on":
-		return true
+		return true, nil
+	case "false", "0", "no", "off":
+		return false, nil
 	}
-	return false
+	return false, fmt.Errorf("transport: option %q must be true or false, got %q", key, s)
 }
 
 func firstNonEmpty(vs ...string) string {

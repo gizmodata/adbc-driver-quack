@@ -10,6 +10,29 @@ import (
 	"github.com/gizmodata/adbc-driver-quack/internal/transport"
 )
 
+// errPrefix starts every error message the driver returns, per the ADBC
+// driver style guide ("[driver] message", the driver's slug as installed:
+// `quack`). The C wrapper (pkg/quack) uses the same prefix and does not add
+// it twice.
+const errPrefix = "[quack] "
+
+// prefixed returns msg with errPrefix in front, once.
+func prefixed(msg string) string {
+	if strings.HasPrefix(msg, errPrefix) {
+		return msg
+	}
+	return errPrefix + msg
+}
+
+// newError builds an adbc.Error whose message carries errPrefix.
+func newError(code adbc.Status, msg string, state string) adbc.Error {
+	e := adbc.Error{Code: code, Msg: prefixed(msg)}
+	if state != "" {
+		e.SqlState = sqlState(state)
+	}
+	return e
+}
+
 // fromTransportError turns a session/transport failure into an adbc.Error.
 // A Quack 2.0 server reports DuckDB's exception type with every error
 // ("Catalog", "Parser", "Constraint", ...), which picks the ADBC status
@@ -21,20 +44,21 @@ func fromTransportError(err error) error {
 	}
 	var ae adbc.Error
 	if errors.As(err, &ae) {
+		ae.Msg = prefixed(ae.Msg)
 		return ae
 	}
 	if errors.Is(err, context.Canceled) {
-		return adbc.Error{Code: adbc.StatusCancelled, Msg: err.Error(), SqlState: sqlState("57014")}
+		return newError(adbc.StatusCancelled, err.Error(), "57014")
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return adbc.Error{Code: adbc.StatusTimeout, Msg: err.Error(), SqlState: sqlState("HYT00")}
+		return newError(adbc.StatusTimeout, err.Error(), "HYT00")
 	}
 	var se *transport.ErrServerError
 	if errors.As(err, &se) {
 		code, state := classifyServerError(se)
-		return adbc.Error{Code: code, Msg: se.Error(), SqlState: sqlState(state)}
+		return newError(code, se.Error(), state)
 	}
-	return adbc.Error{Code: adbc.StatusIO, Msg: err.Error(), SqlState: sqlState("08006")}
+	return newError(adbc.StatusIO, err.Error(), "08006")
 }
 
 func sqlState(s string) [5]byte {

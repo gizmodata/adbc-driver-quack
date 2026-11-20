@@ -43,10 +43,19 @@ the pinned commits, and run the full suites against the new `duckdb` package.
   is 13.0, so the macOS wheel is tagged 13.0.
 - **No `panic` across the cgo boundary**; the generated wrapper recovers.
 - `pkg/quack/driver.go`, `utils.c`, `utils.h` are generated from arrow-adbc's
-  `go/adbc/pkg/_tmpl` (`go run ./gen -prefix Quack ...` in that module), with two local
-  edits: include paths and `exportRecordBatch` in `QuackArrayStreamGetNext`
-  (`array_export.go`; arrow-go's exporter drops extension arrays' storage children).
-- **Option naming:** `adbc.quack.<noun>`. Unknown database options are NOT_IMPLEMENTED.
+  `go/adbc/pkg/_tmpl` (`go run ./gen -prefix Quack ...` in that module), with three local
+  edits: include paths, `exportRecordBatch` in `QuackArrayStreamGetNext`
+  (`array_export.go`; arrow-go's exporter drops extension arrays' storage children), and
+  `setErr` (prefix `[quack] `, the driver slug, not `[Quack] `; a call without arguments is a
+  finished message, not a format, so a `%` in a server error survives).
+- **Option naming** ([ADBC driver style guide](https://adbc-drivers.org/building-drivers/style-guide.html)):
+  `quack.<group>.<option>` with groups `auth`, `tls`, `session`, `http` (and `query` / `ingest`
+  for statement and bulk-ingest options, should the driver gain any); never `adbc.` (spec
+  options only). A timeout in seconds ends in `_seconds`. The keys and the deprecated
+  `adbc.quack.*` aliases live in `internal/transport/options.go`; an alias warns once per key
+  per process, naming keys only, never values. Unknown database options are NOT_IMPLEMENTED
+  (other `adbc.quack.*` keys are still accepted, as before 1.1).
+- **Errors** read `[quack] message` (`newError` / `errStatus` in `driver/quack`).
 - **DriverInfoName:** "ADBC Quack Driver - Go"; `driver/quack/version.go` holds the version,
   kept in sync with `python/adbc_driver_quack/_version.py`.
 - **Python floor:** 3.11 (3.10 reached end of life on 2026-10-01); pyarrow `>=14.0.1` on

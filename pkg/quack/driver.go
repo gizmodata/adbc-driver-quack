@@ -76,7 +76,9 @@ var drv = quack.NewDriver(mallocator.NewMallocator())
 // since internal state of driver is unknown
 var globalPoison atomic.Bool
 
-const errPrefix = "[Quack] "
+// errPrefix is the driver's slug in brackets, per the ADBC driver style guide
+// ("[driver] message"); local edit, the template uses "[Quack] ".
+const errPrefix = "[quack] "
 const logLevelEnvVar = "ADBC_DRIVER_QUACK_LOG_LEVEL"
 
 func setErr(err *C.struct_AdbcError, format string, vals ...interface{}) {
@@ -88,14 +90,15 @@ func setErr(err *C.struct_AdbcError, format string, vals ...interface{}) {
 		C.QuackerrRelease(err)
 	}
 
-	var msg string
-	if strings.HasPrefix(format, errPrefix) {
-		// If the error message already starts with the prefix, we don't
-		// want to add it again.
+	// Local edit: a call without arguments passes a finished message (often
+	// a Go error's text, which may contain '%'), so it is not a format; and
+	// the prefix check looks at the message, not the format.
+	msg := format
+	if len(vals) > 0 {
 		msg = fmt.Sprintf(format, vals...)
-	} else {
-		// Otherwise, we prepend the prefix to the error message.
-		msg = errPrefix + fmt.Sprintf(format, vals...)
+	}
+	if !strings.HasPrefix(msg, errPrefix) {
+		msg = errPrefix + msg
 	}
 	err.message = C.CString(msg)
 	err.release = (*[0]byte)(C.Quack_release_error)

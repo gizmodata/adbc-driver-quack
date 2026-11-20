@@ -13,6 +13,7 @@
 [![PyPI Downloads](https://img.shields.io/pepy/dt/adbc-driver-quack.svg)](https://pypi.org/project/adbc-driver-quack/)
 [![DuckDB 2.0](https://img.shields.io/badge/DuckDB-2.0-fff000.svg?logo=duckdb&logoColor=black)](https://duckdb.org)
 [![ADBC conformance](https://img.shields.io/badge/ADBC-conformance%20suites%20passing-2ea44f.svg)](#conformance)
+[![Follows the ADBC driver style guide](https://img.shields.io/badge/ADBC%20style%20guide-conforms-2ea44f.svg)](https://adbc-drivers.org/building-drivers/style-guide.html)
 [![License](https://img.shields.io/github/license/gizmodata/adbc-driver-quack)](https://github.com/gizmodata/adbc-driver-quack/blob/main/LICENSE)
 [![Hardcharger](https://img.shields.io/badge/works%20with-Hardcharger%E2%84%A2-f15a24.svg)](https://gizmodata.com/hardcharger)
 
@@ -88,7 +89,7 @@ import pyarrow
 
 with quack.connect(
     uri="quack://localhost:9494",
-    db_kwargs={"adbc.quack.token": "my-secret-token"},
+    db_kwargs={"quack.auth.token": "my-secret-token"},
 ) as conn, conn.cursor() as cur:
     cur.execute("SELECT 42 AS answer, 'hello duckdb' AS greeting")
     table: pyarrow.Table = cur.fetch_arrow_table()
@@ -115,7 +116,7 @@ func main() {
 	ctx := context.Background()
 	db, err := quack.NewDriver(memory.DefaultAllocator).NewDatabase(map[string]string{
 		"uri":              "quack://localhost:9494",
-		"adbc.quack.token": "my-secret-token",
+		"quack.auth.token": "my-secret-token",
 	})
 	if err != nil {
 		panic(err)
@@ -169,7 +170,7 @@ from adbc_driver_quack import dbapi as quack
 table = pa.table({"id": [1, 2, 3], "name": ["alice", "bob", "carol"]})
 with quack.connect(
     uri="quack://localhost:9494",
-    db_kwargs={"adbc.quack.token": "my-secret-token"},
+    db_kwargs={"quack.auth.token": "my-secret-token"},
     autocommit=True,  # ADBC connections start in a transaction; opt in so the ingest persists
 ) as conn, conn.cursor() as cur:
     rows = cur.adbc_ingest(table_name="customers", data=table, mode="create_append")
@@ -201,7 +202,7 @@ same as one loaded with DuckDB's ADBC driver. `db_schema_name=…`, `catalog_nam
 ```python
 with quack.connect(
     uri="quack://localhost:9494",
-    db_kwargs={"adbc.quack.token": "my-secret-token"},
+    db_kwargs={"quack.auth.token": "my-secret-token"},
     autocommit=False,
 ) as conn, conn.cursor() as cur:
     cur.execute("INSERT INTO orders VALUES (1, 'pending')")
@@ -215,7 +216,7 @@ with quack.connect(
 
 DuckDB 2.0 serves Quack over **HTTPS on any address but localhost**, and the driver follows
 the same rule: plain HTTP to `localhost` / `127.0.0.1` / `::1`, HTTPS everywhere else.
-`adbc.quack.tls` overrides it either way.
+`quack.tls.enabled` overrides it either way.
 
 `quack_serve` generates a self-signed certificate on first use. A client authenticates such
 a server by **pinning its certificate's SHA-256 fingerprint**, as DuckDB's own client does:
@@ -230,8 +231,8 @@ CALL quack_serve('quack:0.0.0.0:9494', token => 'my-secret-token', allow_other_h
 quack.connect(
     uri="quack://db.example.com:9494",
     db_kwargs={
-        "adbc.quack.token": "my-secret-token",
-        "adbc.quack.ssl_fingerprint": "2B:31:F0:…:EA",  # the colon form openssl prints works too
+        "quack.auth.token": "my-secret-token",
+        "quack.tls.certificate_fingerprint": "2B:31:F0:…:EA",  # the colon form openssl prints works too
     },
 )
 ```
@@ -287,7 +288,7 @@ from adbc_driver_quack import dbapi as quack
 from adbc_driver_hardcharger import dbapi as hardcharger
 
 with quack.connect(uri="quack://quack.example.com:9494",
-                   db_kwargs={"adbc.quack.token": quack_token}) as src, \
+                   db_kwargs={"quack.auth.token": quack_token}) as src, \
      hardcharger.connect(uri="hardcharger://hardcharger.example.com",
                          username="app", password=password) as dst:
     with src.cursor() as s, dst.cursor() as d:
@@ -327,7 +328,7 @@ CREATE SECRET quack_secret (
     driver 'quack',                     -- by name after `python -m adbc_driver_quack install-manifest`,
                                         -- or a path: '/path/to/libadbc_driver_quack.so'
     uri 'quack://quack.example.com:9494',
-    extra_options MAP {'adbc.quack.token': '********'}
+    extra_options MAP {'quack.auth.token': '********'}
 );
 ATTACH 'quack://quack.example.com:9494' AS q (TYPE adbc);
 
@@ -379,22 +380,46 @@ quack://host[:port]      also accepted: quack:host[:port] (DuckDB's spelling)
 | Option | Default | Notes |
 |---|---|---|
 | `uri` | required | `quack://host:port`; the default port is 9494. |
-| `adbc.quack.token` | (none) | The token `quack_serve` was started with. |
-| `adbc.quack.token_env` | (none) | Environment variable to read the token from. Option only, refused on the URL. |
-| `adbc.quack.token_file` | (none) | File to read the token from. Option only, refused on the URL. |
-| `adbc.quack.tls` | auto | `true`/`false`. Unset: HTTP for localhost / 127.0.0.1 / ::1, HTTPS elsewhere. |
-| `adbc.quack.ssl_fingerprint` | (none) | SHA-256 fingerprint of the one server certificate to trust (self-signed `quack_serve`). Implies TLS. |
-| `adbc.quack.heartbeat_timeout_seconds` | `60` | Connection lease to request; the driver renews it while idle. |
-| `adbc.quack.client_id` | (none) | Client identifier shown (hashed) in the server's `quack_active_connections()`. |
-| `adbc.quack.rpc.timeout_seconds.connect` | `10` | HTTP connect timeout: seconds, or a Go duration like `1.5s`. |
-| `adbc.quack.rpc.timeout_seconds.request` | `60` | Per-request timeout: seconds, or a Go duration like `90s`. |
-| `adbc.quack.http.header.<Name>` | (none) | Extra HTTP header on every request (proxy / load-balancer auth). Repeatable; empty clears. Option only. |
+| `quack.auth.token` | (none) | The token `quack_serve` was started with. |
+| `quack.auth.token_env` | (none) | Environment variable to read the token from. Option only, refused on the URL. |
+| `quack.auth.token_file` | (none) | File to read the token from. Option only, refused on the URL. |
+| `quack.tls.enabled` | auto | `true`/`false`. Unset: HTTP for localhost / 127.0.0.1 / ::1, HTTPS elsewhere. |
+| `quack.tls.certificate_fingerprint` | (none) | SHA-256 fingerprint of the one server certificate to trust (self-signed `quack_serve`). Implies TLS. |
+| `quack.session.heartbeat_timeout_seconds` | `60` | Connection lease to request; the driver renews it while idle. |
+| `quack.session.client_id` | (none) | Client identifier shown (hashed) in the server's `quack_active_connections()`. |
+| `quack.http.connect_timeout_seconds` | `10` | HTTP connect timeout: seconds, or a Go duration like `1.5s`. |
+| `quack.http.request_timeout_seconds` | `60` | Per-request timeout: seconds, or a Go duration like `90s`. |
+| `quack.http.header.<Name>` | (none) | Extra HTTP header on every request (proxy / load-balancer auth). Repeatable; empty clears. Option only. |
 
-An explicit `adbc.quack.token` wins over `token_env`, which wins over `token_file`. The
+An explicit `quack.auth.token` wins over `token_env`, which wins over `token_file`. The
 indirections and extra headers are accepted only as ADBC options, never as URL query
 parameters: a pasted URL must not be able to read a local secret, or add headers, and send
 them to the host it names. An unknown option is an error, so a misspelled one never goes
 unnoticed.
+
+The option names follow the [ADBC driver style guide](https://adbc-drivers.org/building-drivers/style-guide.html):
+`quack.<group>.<option>`, never `adbc.` (that prefix belongs to options the ADBC specification
+defines), and errors read `[quack] message`. Before 1.1 the options were named `adbc.quack.*`.
+Those names still work, for setting and for `GetOption`, but the first use of each in a
+process prints one line to stderr, naming the key only (never its value):
+`[quack] option "adbc.quack.token" is deprecated; use "quack.auth.token"`. When both names
+are given, the new one wins, unless its value is empty and the old one's is not. Header names
+compare case-insensitively; two keys naming the same header under one prefix are refused. A
+key under `quack.` or `adbc.quack.` that isn't an option is refused (so is a boolean other than
+`true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`).
+
+| Deprecated (before 1.1) | Use |
+|---|---|
+| `adbc.quack.token` | `quack.auth.token` |
+| `adbc.quack.token_env` | `quack.auth.token_env` |
+| `adbc.quack.token_file` | `quack.auth.token_file` |
+| `adbc.quack.tls` | `quack.tls.enabled` |
+| `adbc.quack.ssl_fingerprint` | `quack.tls.certificate_fingerprint` |
+| `adbc.quack.heartbeat_timeout_seconds` | `quack.session.heartbeat_timeout_seconds` |
+| `adbc.quack.client_id` | `quack.session.client_id` |
+| `adbc.quack.rpc.timeout_seconds.connect` | `quack.http.connect_timeout_seconds` |
+| `adbc.quack.rpc.timeout_seconds.request` | `quack.http.request_timeout_seconds` |
+| `adbc.quack.http.header.<Name>` | `quack.http.header.<Name>` |
 
 The driver supports ADBC 1.1's `GetOption` / `SetOption`, the current catalog and schema
 (`adbc.connection.catalog`, `adbc.connection.db_schema`), `GetInfo`, `GetObjects` (with
@@ -422,7 +447,7 @@ Then the driver manager finds the driver by URI scheme, with no import of
 ```python
 from adbc_driver_manager import dbapi
 
-conn = dbapi.connect(uri="quack://localhost:9494", db_kwargs={"adbc.quack.token": "my-secret-token"})
+conn = dbapi.connect(uri="quack://localhost:9494", db_kwargs={"quack.auth.token": "my-secret-token"})
 ```
 
 and a profile (`~/.config/adbc/profiles/quack_prod.toml` on Linux,
@@ -435,8 +460,8 @@ driver = "quack"
 
 [Options]
 uri = "quack://prod.example.com:9494"
-"adbc.quack.ssl_fingerprint" = "2B:31:F0:…:EA"
-"adbc.quack.token" = "{{ env_var(QUACK_TOKEN) }}"
+"quack.tls.certificate_fingerprint" = "2B:31:F0:…:EA"
+"quack.auth.token" = "{{ env_var(QUACK_TOKEN) }}"
 ```
 
 ```python

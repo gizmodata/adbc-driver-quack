@@ -32,7 +32,7 @@ concurrency:
 #   only, after every test job passed on the tagged commit itself.
 
 env:
-  GO_VERSION: '1.27.3'
+  GO_VERSION: '1.27.4'
 
 jobs:
   # Decides whether this run is about code (code=true) or documentation only (code=false). Every
@@ -128,7 +128,7 @@ jobs:
 
       - name: Start a DuckDB 2.0 Quack server
         run: |
-          python -m pip install --quiet "duckdb>=2.0.0"
+          python -m pip install --quiet "duckdb>=2.0.1"
           python scripts/quack_test_server.py --port 9494 > quack-server.log 2>&1 &
           for i in $(seq 1 30); do grep -q READY quack-server.log && break; sleep 1; done
           cat quack-server.log
@@ -246,7 +246,8 @@ jobs:
           export ADBC_QUACK_LIBRARY="$PWD/pkg/quack/libadbc_driver_quack.so"
           echo "ADBC_QUACK_LIBRARY=$ADBC_QUACK_LIBRARY" >> "$GITHUB_ENV"
           python -m pip install --upgrade pip
-          python -m pip install -e . "duckdb>=2.0.0" \
+          # duckdb exactly as validation/tests/quack.py's vendor_version names it.
+          python -m pip install -e . "duckdb==2.0.1" \
             "adbc-drivers-validation @ git+https://github.com/adbc-drivers/validation@f0631651f79bd01b67c5776be6fe3b7fbfbe083b"
 
       - name: Start a DuckDB 2.0 Quack server for validation
@@ -342,7 +343,7 @@ jobs:
       - uses: mlugg/setup-zig@v2
         if: ${{ matrix.goos == 'linux' }}
         with:
-          version: 0.14.1
+          version: 0.17.1
 
       - name: Install llvm-mingw (cgo C toolchain for windows/arm64)
         if: ${{ matrix.dll_only }}
@@ -443,7 +444,9 @@ jobs:
           "$VPY" -m pip install --upgrade pip --quiet
           WHEEL=$(ls dist/*.whl | head -1)
           echo "Installing $WHEEL plus test dependencies"
-          "$VPY" -m pip install "$WHEEL" pytest "duckdb>=2.0.0" pandas --quiet
+          # duckdb as pinned in pyproject.toml's [test] extra (Query.Farm's adbc_scanner, which the
+          # duckdb_ext tests load, has no DuckDB 2.0.1 build yet).
+          "$VPY" -m pip install "$WHEEL" pytest "duckdb==2.0.0" pandas --quiet
           TESTS="${RUNNER_TEMP}/wheel-smoke-tests"
           rm -rf "$TESTS"
           cp -R python/tests "$TESTS"
@@ -525,7 +528,7 @@ jobs:
           /tmp/venv/bin/python - <<'PY'
           import adbc_driver_quack.dbapi as quack
           try:
-              quack.connect(uri="quack://127.0.0.1:1", db_kwargs={"adbc.quack.token": "nope"}).close()
+              quack.connect(uri="quack://127.0.0.1:1", db_kwargs={"quack.auth.token": "nope"}).close()
           except Exception as e:
               message = str(e)
               print(type(e).__name__, message[:300])

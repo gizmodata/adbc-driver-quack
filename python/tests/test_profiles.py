@@ -60,7 +60,7 @@ driver = "quack"
 
 [Options]
 uri = "{quack_server.uri}"
-"adbc.quack.token" = "{{{{ env_var(QUACK_IT_TOKEN) }}}}"
+"quack.auth.token" = "{{{{ env_var(QUACK_IT_TOKEN) }}}}"
 ''',
         encoding="utf-8",
     )
@@ -81,7 +81,7 @@ def test_extra_http_headers_full_stack(quack_server):
         uri=quack_server.uri,
         db_kwargs={
             **quack_server.db_kwargs,
-            "adbc.quack.http.header.X-Proxy-Auth": "it-header-value",
+            "quack.http.header.X-Proxy-Auth": "it-header-value",
         },
     ) as conn, conn.cursor() as cur:
         cur.execute("SELECT 7 AS lucky")
@@ -94,6 +94,6 @@ def test_extra_http_headers_rejected_on_url(quack_server):
 
     with pytest.raises(Exception, match="not a URL query parameter"):
         quack.connect(
-            uri=quack_server.uri + "?adbc.quack.http.header.X-Evil=1",
+            uri=quack_server.uri + "?quack.http.header.X-Evil=1",
             db_kwargs=quack_server.db_kwargs,
         )

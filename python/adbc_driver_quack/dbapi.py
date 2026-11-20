@@ -95,8 +95,8 @@ def connect(
         Quack connection URL, e.g. ``"quack://127.0.0.1:9494"``.
     db_kwargs:
         Optional mapping of ADBC database options. Common keys:
-        ``adbc.quack.token`` for the auth token,
-        ``adbc.quack.tls`` to use HTTPS.
+        ``quack.auth.token`` for the auth token,
+        ``quack.tls.enabled`` to use HTTPS.
     conn_kwargs:
         Optional mapping of ADBC connection options.
     autocommit:

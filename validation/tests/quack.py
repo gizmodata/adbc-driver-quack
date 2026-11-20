@@ -21,7 +21,9 @@ class QuackQuirks(model.DriverQuirks):
     driver = "adbc_driver_quack"
     driver_name = "ADBC Quack Driver - Go"
     vendor_name = "DuckDB (via Quack)"
-    vendor_version = "v2.0.0"  # as DuckDB reports it (SELECT version())
+    # As DuckDB reports it (SELECT version()); CI's conformance job installs exactly this
+    # duckdb for its server (.github/workflows/python.yml), so keep the two in step.
+    vendor_version = "v2.0.1"
     short_version = "2.0"
     features = model.DriverFeatures(
         connection_get_table_schema=True,
@@ -54,7 +56,7 @@ class QuackQuirks(model.DriverQuirks):
     setup = model.DriverSetup(
         database={
             "uri": model.FromEnv(URI_ENV),
-            "adbc.quack.token": model.FromEnv(TOKEN_ENV),
+            "quack.auth.token": model.FromEnv(TOKEN_ENV),
         },
         connection={},
         statement={},

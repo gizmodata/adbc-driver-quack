@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync/atomic"
 
+	"github.com/apache/arrow-adbc/go/adbc"
+
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -86,7 +88,7 @@ func (r *streamingRecordReader) Next() bool {
 	for {
 		chunk, err := r.cursor.nextChunk(r.ctx)
 		if err != nil {
-			r.err = err
+			r.err = fromTransportError(err)
 			return false
 		}
 		if chunk == nil {
@@ -98,7 +100,7 @@ func (r *streamingRecordReader) Next() bool {
 		}
 		rec, err := RecordFromChunk(r.alloc, r.colNames, *chunk)
 		if err != nil {
-			r.err = err
+			r.err = newError(adbc.StatusInvalidData, err.Error(), "")
 			return false
 		}
 		r.current = rec

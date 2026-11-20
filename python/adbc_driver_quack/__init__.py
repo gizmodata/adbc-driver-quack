@@ -20,63 +20,68 @@ __all__ = [
 ]
 
 #: Prefix for extra-HTTP-header database options. Append the header
-#: name: ``{"adbc.quack.http.header.X-Proxy-Auth": "secret"}`` sends
+#: name: ``{"quack.http.header.X-Proxy-Auth": "secret"}`` sends
 #: ``X-Proxy-Auth: secret`` with every request (proxy/LB auth). An
 #: empty value clears the header. Accepted only as ADBC options, never
 #: as URL query parameters.
-HTTP_HEADER_OPTION_PREFIX = "adbc.quack.http.header."
+HTTP_HEADER_OPTION_PREFIX = "quack.http.header."
 
 
 class DatabaseOptions(enum.Enum):
-    """Database options specific to the Quack driver."""
+    """Database options specific to the Quack driver.
+
+    The keys follow the ADBC driver style guide (``quack.<group>.<option>``).
+    The pre-1.1 ``adbc.quack.*`` keys still work, and print a deprecation
+    warning to stderr the first time each one is used in a process.
+    """
 
     #: The authentication token to send during the CONNECTION_REQUEST handshake.
-    TOKEN = "adbc.quack.token"
+    TOKEN = "quack.auth.token"
 
     #: Name of an environment variable to read the token from.
     #: Accepted only as an option, never as a URL query parameter.
-    TOKEN_ENV = "adbc.quack.token_env"
+    TOKEN_ENV = "quack.auth.token_env"
 
     #: Path to a local file to read the token from.
     #: Accepted only as an option, never as a URL query parameter.
-    TOKEN_FILE = "adbc.quack.token_file"
+    TOKEN_FILE = "quack.auth.token_file"
 
     #: "true" for HTTPS, "false" for plain HTTP. Unset follows DuckDB 2.0:
     #: plain HTTP to localhost / 127.0.0.1 / ::1, HTTPS to any other host.
-    TLS = "adbc.quack.tls"
+    TLS = "quack.tls.enabled"
 
     #: SHA-256 fingerprint of the one server certificate to trust instead of
     #: CA verification (how a client authenticates a quack_serve self-signed
     #: certificate). Implies TLS. Accepts the colon-separated form openssl prints.
-    SSL_FINGERPRINT = "adbc.quack.ssl_fingerprint"
+    SSL_FINGERPRINT = "quack.tls.certificate_fingerprint"
 
     #: Connection lease requested from the server, in seconds (default 60).
     #: The driver renews it with a background heartbeat while idle.
-    HEARTBEAT_TIMEOUT = "adbc.quack.heartbeat_timeout_seconds"
+    HEARTBEAT_TIMEOUT = "quack.session.heartbeat_timeout_seconds"
 
     #: Opaque client identifier shown (hashed) in the server's
     #: quack_active_connections(). Empty, or at least 4 characters.
-    CLIENT_ID = "adbc.quack.client_id"
+    CLIENT_ID = "quack.session.client_id"
 
     #: HTTP connect timeout: seconds, or a Go duration like "1.5s" (default 10).
-    CONNECT_TIMEOUT = "adbc.quack.rpc.timeout_seconds.connect"
+    CONNECT_TIMEOUT = "quack.http.connect_timeout_seconds"
 
     #: Per-request HTTP timeout: seconds, or a Go duration like "90s" (default 60).
-    REQUEST_TIMEOUT = "adbc.quack.rpc.timeout_seconds.request"
+    REQUEST_TIMEOUT = "quack.http.request_timeout_seconds"
 
 
 class ConnectionOptions(enum.Enum):
     """Connection options specific to the Quack driver."""
 
     #: Reserved for future use.
-    _RESERVED = "adbc.quack.connection.reserved"
+    _RESERVED = "quack.connection.reserved"
 
 
 class StatementOptions(enum.Enum):
     """Statement options specific to the Quack driver."""
 
     #: Reserved for future use.
-    _RESERVED = "adbc.quack.statement.reserved"
+    _RESERVED = "quack.query.reserved"
 
 
 @functools.lru_cache(maxsize=1)
@@ -139,8 +144,8 @@ def connect(
         Quack connection URL, e.g. ``"quack://127.0.0.1:9494"``.
     db_kwargs:
         Optional mapping of ADBC database options. Common keys:
-        ``adbc.quack.token`` for the auth token,
-        ``adbc.quack.tls`` to use HTTPS.
+        ``quack.auth.token`` for the auth token,
+        ``quack.tls.enabled`` to use HTTPS.
     """
     kwargs = {"driver": _driver_path(), "entrypoint": "AdbcDriverQuackInit", "uri": uri}
     if db_kwargs:

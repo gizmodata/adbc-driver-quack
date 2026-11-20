@@ -199,7 +199,7 @@ def test_cancel_interrupts_the_server_statement(quack_server):
 def test_tls_with_pinned_fingerprint(quack_tls_server):
     with quack.connect(
         uri=quack_tls_server.uri,
-        db_kwargs={**quack_tls_server.db_kwargs, "adbc.quack.ssl_fingerprint": quack_tls_server.fingerprint},
+        db_kwargs={**quack_tls_server.db_kwargs, "quack.tls.certificate_fingerprint": quack_tls_server.fingerprint},
     ) as conn, conn.cursor() as cur:
         cur.execute("SELECT 42")
         assert cur.fetchone() == (42,)
@@ -210,13 +210,13 @@ def test_tls_wrong_fingerprint_is_refused(quack_tls_server):
     with pytest.raises(adbc_driver_manager.Error, match="fingerprint"):
         quack.connect(
             uri=quack_tls_server.uri,
-            db_kwargs={**quack_tls_server.db_kwargs, "adbc.quack.ssl_fingerprint": wrong},
+            db_kwargs={**quack_tls_server.db_kwargs, "quack.tls.certificate_fingerprint": wrong},
         )
 
 
 def test_tls_self_signed_without_a_pin_is_refused(quack_tls_server):
     with pytest.raises(adbc_driver_manager.Error, match="certificate"):
-        quack.connect(uri=quack_tls_server.uri, db_kwargs={**quack_tls_server.db_kwargs, "adbc.quack.tls": "true"})
+        quack.connect(uri=quack_tls_server.uri, db_kwargs={**quack_tls_server.db_kwargs, "quack.tls.enabled": "true"})
 
 
 def test_plain_http_to_a_tls_server_fails(quack_tls_server):

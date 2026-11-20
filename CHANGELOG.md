@@ -6,8 +6,90 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-20
+
+Option names and error messages now follow the
+[ADBC driver style guide](https://adbc-drivers.org/building-drivers/style-guide.html). The old
+option names keep working.
+
+### Changed
+
+- **Option names follow the ADBC driver style guide**: `quack.<group>.<option>`, no longer
+  `adbc.quack.*` (`adbc.` is reserved for options the ADBC specification defines, such as `uri`,
+  `adbc.connection.autocommit` and `adbc.ingest.*`, which are unchanged). The old names still
+  work, for setting and for `GetOption`, both as ADBC options and (where they were accepted
+  before) as URL query parameters. The first time each old name is used in a process, the driver
+  prints one line to stderr naming the keys only, never the value:
+  `[quack] option "adbc.quack.token" is deprecated; use "quack.auth.token"`. When an old and a
+  new name are both given, the new one wins, unless its value is empty and the old one's is not:
+  an empty value never erases a non-empty one (so an empty `quack.tls.certificate_fingerprint`
+  can't drop a pin set under `adbc.quack.ssl_fingerprint`, nor an empty token erase a token).
+  Extra HTTP header names compare case-insensitively: `adbc.quack.http.header.x-proxy-auth` and
+  `quack.http.header.X-Proxy-Auth` are one header (the new spelling wins), and two keys under
+  the same prefix that name the same header (`quack.http.header.X-A` and `quack.http.header.x-a`)
+  are refused. Go: the `Option*` constants keep their names and
+  now hold the new keys, and `DeprecatedOptions()` lists the old ones; Python:
+  `DatabaseOptions` keeps its member names and `HTTP_HEADER_OPTION_PREFIX` is
+  `quack.http.header.`.
+
+  | Deprecated (before 1.1) | New name |
+  |---|---|
+  | `adbc.quack.token` | `quack.auth.token` |
+  | `adbc.quack.token_env` | `quack.auth.token_env` |
+  | `adbc.quack.token_file` | `quack.auth.token_file` |
+  | `adbc.quack.tls` | `quack.tls.enabled` |
+  | `adbc.quack.ssl_fingerprint` | `quack.tls.certificate_fingerprint` |
+  | `adbc.quack.heartbeat_timeout_seconds` | `quack.session.heartbeat_timeout_seconds` |
+  | `adbc.quack.client_id` | `quack.session.client_id` |
+  | `adbc.quack.rpc.timeout_seconds.connect` | `quack.http.connect_timeout_seconds` |
+  | `adbc.quack.rpc.timeout_seconds.request` | `quack.http.request_timeout_seconds` |
+  | `adbc.quack.http.header.<Name>` | `quack.http.header.<Name>` |
+
+- **Behaviour change: unknown `quack.*` and `adbc.quack.*` keys are refused**, as options
+  (`NOT_IMPLEMENTED`, `[quack] unsupported option "<key as written>"`) and as URL query
+  parameters. Before, any `adbc.quack.*` database option was accepted and ignored, so a
+  misspelled or half-migrated key (`adbc.quack.tls.enabled=true`,
+  `adbc.quack.tls.certificate_fingerprint=...`) silently did nothing: TLS stayed off, the pin was
+  never set. No `adbc.quack.*` key was ever documented as reserved or accepted-and-ignored, so
+  none is kept; the old spellings in the table above still work.
+- **Behaviour change: boolean options refuse values they don't recognise.** `quack.tls.enabled`
+  (and `adbc.quack.tls`, and the `tls` URL parameter) accept `true`/`false`, `1`/`0`, `yes`/`no`
+  and `on`/`off` in any case; anything else is an `INVALID_ARGUMENT` error naming the key.
+  Before, any other value meant false, so `quack.tls.enabled=ture` sent plain HTTP to a remote
+  host.
+- **Error messages read `[quack] message`** (the driver's slug, as the style guide asks), from
+  Go, Python and the C library alike. Before, the prefix depended on the path (`[Quack] ` from
+  the C library for callers without ADBC 1.1 error details, none from Go), and two connection
+  errors started with `quack: `. Only the prefix was added: a refused connection still says
+  `(tried http://<host>:<port>/quack)`, which gizmodata/adbc-install's canary looks for, and an
+  unknown option is refused under the key as written. Errors raised while reading a result
+  stream are now `adbc.Error`s with a status, like every other error.
+- **README and PyPI page**: a badge saying the driver follows the
+  [ADBC driver style guide](https://adbc-drivers.org/building-drivers/style-guide.html), next to
+  the conformance badge. The PyPI page (`python/README.md`) carries the repository README's
+  branding: the badge row (CI, Python versions, PyPI version, downloads, DuckDB 2.0, conformance,
+  style guide, license, Hardcharger), the GizmoData logo footer and trademark line, with absolute
+  URLs so they render on PyPI, and a short section on the option names.
+- **Dependencies**: arrow-go v18.8.0 → v18.9.0, brotli v1.2.3 → v1.3.0, thrift v0.24.0 →
+  v0.25.0, klauspost/compress v1.20.0 → v1.20.5, lz4 v4.1.29 → v4.1.33, yaml v3.0.5 → v3.0.6,
+  golang.org/x/exp and x/tools to their latest; `toolchain go1.27.4` in `go.mod` (the `go 1.26.0`
+  floor is unchanged); CI builds with Go 1.27.4 and zig 0.17.1 (was 0.14.1; the Linux libraries
+  still need only glibc 2.17). Test extras: hardcharger ≥ 2.13.3; build: setuptools ≥ 84.2.1.
+  The Go live suite runs against the latest DuckDB (2.0.1) and the conformance suite against
+  exactly 2.0.1 (its expected server version is now `v2.0.1`); the Python suite's in-process
+  server stays on duckdb 2.0.0 until Query.Farm publishes `adbc_scanner` for DuckDB 2.0.1, which
+  the `adbc_scanner` tests install (the reason is written next to the pin in `pyproject.toml`).
+
+- **PyPI page**: the package's description on PyPI is now its own Python-only page, `python/README.md` (install, requirements, connect and query, streaming, loading the driver by name), linking to the repository README for other languages, the one-line installer and the full reference; the repository README keeps everything. `python/tests/test_pypi_readme.py` runs every Python example on that page against the live database.
+- **README**: installing without Python is one line, `curl https://install.adbc.gizmodata.com/quack | sh` (Linux, macOS) or `irm https://install.adbc.gizmodata.com/quack.ps1 | iex` (Windows): it installs the release's shared library, checked against its `SHA256SUMS`, and a `quack` driver manifest, so any ADBC driver manager loads it as `driver = "quack"` ([gizmodata/adbc-install](https://github.com/gizmodata/adbc-install)).
+- **CI**: a change that touches only documentation (`*.md`, `docs/`, `LICENSE`, `NOTICE`) now gets a run that skips the build and test jobs (it used to get no run, so its required checks never reported), and one job, `CI result`, reports on every run and is the only required check. The glibc-2.28 install check retries `dnf install` with fresh metadata, so a mirror serving a broken `repomd.xml` can't fail a build.
+
 ### Fixed
 
+- **An error message containing `%` reaches C callers unchanged.** The C library used an
+  error's text as a format string when the caller did not ask for ADBC 1.1 error details, so an
+  option named `quack.50%off` was reported as `quack.50%!o(MISSING)ff`
+  (`python/tests/test_c_errors.py` calls the library's `Adbc*` functions both ways).
 - On Windows, the driver manifest that `python -m adbc_driver_quack install-manifest` writes also names the library under `windows_<arch>_mingw`, the key R's `adbcdrivermanager` (built with MinGW) looks up, so loading the driver by name from R on Windows works ([gizmodata/adbc-install#10](https://github.com/gizmodata/adbc-install/issues/10)). Run it again to update an existing manifest.
 - **A malformed or truncated response can no longer panic the driver, or make it reserve memory, through a count it
   claims.** Vector row counts, dictionary sizes and selections, LIST entries, ARRAY sizes, list lengths and string
@@ -16,12 +98,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an index out of range, or a nil vector). A vector may claim more than 1,048,576 rows only when the message carries
   at least one byte per row, as the FLAT child of a long list does; DuckDB sends CONSTANT and SEQUENCE vectors with
   at most 2,048. Ported from quack-jdbc 1.0.1.
-
-### Changed
-
-- **PyPI page**: the package's description on PyPI is now its own Python-only page, `python/README.md` (install, requirements, connect and query, streaming, loading the driver by name), linking to the repository README for other languages, the one-line installer and the full reference; the repository README keeps everything. `python/tests/test_pypi_readme.py` runs every Python example on that page against the live database.
-- **README**: installing without Python is one line, `curl https://install.adbc.gizmodata.com/quack | sh` (Linux, macOS) or `irm https://install.adbc.gizmodata.com/quack.ps1 | iex` (Windows): it installs the release's shared library, checked against its `SHA256SUMS`, and a `quack` driver manifest, so any ADBC driver manager loads it as `driver = "quack"` ([gizmodata/adbc-install](https://github.com/gizmodata/adbc-install)).
-- **CI**: a change that touches only documentation (`*.md`, `docs/`, `LICENSE`, `NOTICE`) now gets a run that skips the build and test jobs (it used to get no run, so its required checks never reported), and one job, `CI result`, reports on every run and is the only required check. The glibc-2.28 install check retries `dnf install` with fresh metadata, so a mirror serving a broken `repomd.xml` can't fail a build.
 
 ## [1.0.4] - 2026-11-09
 
