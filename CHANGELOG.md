@@ -90,6 +90,7 @@ option names keep working.
   error's text as a format string when the caller did not ask for ADBC 1.1 error details, so an
   option named `quack.50%off` was reported as `quack.50%!o(MISSING)ff`
   (`python/tests/test_c_errors.py` calls the library's `Adbc*` functions both ways).
+- On Windows, the driver manifest that `python -m adbc_driver_quack install-manifest` writes also names the library under `windows_<arch>_mingw`, the key R's `adbcdrivermanager` (built with MinGW) looks up, so loading the driver by name from R on Windows works ([gizmodata/adbc-install#10](https://github.com/gizmodata/adbc-install/issues/10)). Run it again to update an existing manifest.
 - **A malformed or truncated response can no longer panic the driver, or make it reserve memory, through a count it
   claims.** Vector row counts, dictionary sizes and selections, LIST entries, ARRAY sizes, list lengths and string
   lengths are checked against the bytes the message holds before anything is allocated or indexed, and a bad one is
