@@ -44,8 +44,10 @@ option names keep working.
 - **Error messages read `[quack] message`** (the driver's slug, as the style guide asks), from
   Go, Python and the C library alike. Before, the prefix depended on the path (`[Quack] ` from
   the C library for callers without ADBC 1.1 error details, none from Go), and two connection
-  errors started with `quack: `. Errors raised while reading a result stream are now
-  `adbc.Error`s with a status, like every other error.
+  errors started with `quack: `. Only the prefix was added: a refused connection still says
+  `(tried http://<host>:<port>/quack)`, which gizmodata/adbc-install's canary looks for, and an
+  unknown option is refused under the key as written. Errors raised while reading a result
+  stream are now `adbc.Error`s with a status, like every other error.
 - **README and PyPI page**: a badge saying the driver follows the
   [ADBC driver style guide](https://adbc-drivers.org/building-drivers/style-guide.html), next to
   the conformance badge. The PyPI page (`python/README.md`) carries the repository README's

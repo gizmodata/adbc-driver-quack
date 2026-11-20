@@ -67,3 +67,27 @@ def test_message_with_percent_sign_survives(lib, vendor_code):
         _release(error)
     finally:
         lib.AdbcDatabaseRelease(ctypes.byref(db), ctypes.byref(AdbcError()))
+
+
+def test_driver_manager_connection_error_names_the_url_tried(driver_path):
+    """What gizmodata/adbc-install's canary (check_driver_by_name.py) checks: loaded through the
+    ADBC driver manager, a refused connection's error carries "(tried http://127.0.0.1:1/quack)"
+    verbatim, after the driver's [quack] prefix."""
+    import adbc_driver_manager as dm
+
+    with pytest.raises(dm.Error) as excinfo:
+        with dm.AdbcDatabase(driver=driver_path, entrypoint="AdbcDriverQuackInit", uri="quack://127.0.0.1:1") as db:
+            with dm.AdbcConnection(db):
+                pass
+    message = str(excinfo.value)
+    assert "(tried http://127.0.0.1:1/quack)" in message, message
+    assert "[quack] " in message, message
+
+
+def test_unknown_option_refused_under_the_spelling_given(driver_path):
+    import adbc_driver_manager as dm
+
+    for key in ("quack.no_such_option", "adbc.hardcharger.no_such_option"):
+        with pytest.raises(dm.Error) as excinfo:
+            dm.AdbcDatabase(driver=driver_path, entrypoint="AdbcDriverQuackInit", uri="quack://127.0.0.1:1", **{key: "1"}).close()
+        assert f'[quack] unsupported option "{key}"' in str(excinfo.value), str(excinfo.value)

@@ -179,3 +179,18 @@ func TestTransportErrorsCarryThePrefixOnce(t *testing.T) {
 		t.Fatalf("prefix added twice: %q", again.(adbc.Error).Msg)
 	}
 }
+
+// gizmodata/adbc-install's weekly canary recognizes this driver by the text
+// "(tried http://127.0.0.1:1/quack)" in its connection error: keep it verbatim
+// (a prefix is fine).
+func TestRefusedConnectionErrorNamesTheURLItTried(t *testing.T) {
+	db := newTestDatabase(t, map[string]string{OptionURI: "quack://127.0.0.1:1"})
+	_, err := db.Open(t.Context())
+	if err == nil {
+		t.Fatal("connected to 127.0.0.1:1, where nothing should listen")
+	}
+	adbcStatus(t, err) // and the [quack] prefix
+	if msg := err.Error(); !strings.Contains(msg, "(tried http://127.0.0.1:1/quack)") {
+		t.Fatalf("the error no longer names the URL it tried: %q", msg)
+	}
+}
