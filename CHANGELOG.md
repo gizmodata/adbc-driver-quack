@@ -8,6 +8,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- On Windows, the driver manifest that `python -m adbc_driver_quack install-manifest` writes also names the library under `windows_<arch>_mingw`, the key R's `adbcdrivermanager` (built with MinGW) looks up, so loading the driver by name from R on Windows works ([gizmodata/adbc-install#10](https://github.com/gizmodata/adbc-install/issues/10)). Run it again to update an existing manifest.
 - **A malformed or truncated response can no longer panic the driver, or make it reserve memory, through a count it
   claims.** Vector row counts, dictionary sizes and selections, LIST entries, ARRAY sizes, list lengths and string
   lengths are checked against the bytes the message holds before anything is allocated or indexed, and a bad one is
